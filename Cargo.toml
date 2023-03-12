@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "exec",
+    "exec-core",
+    "exec-test",
+]

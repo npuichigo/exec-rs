@@ -1,0 +1,8 @@
+[package]
+name = "exec-test"
+version = "0.1.0"
+edition = "2021"
+description = "Common utilities for testing senders and receivers"
+
+[dependencies]
+exec-core = { path="../exec-core" }
