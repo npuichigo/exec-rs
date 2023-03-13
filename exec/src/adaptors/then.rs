@@ -2,24 +2,29 @@ use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Sender};
 use std::marker::PhantomData;
 
-pub struct Then<S, F> {
+pub struct Then<S, F, I> {
     sender: S,
     func: F,
+    _phantom: PhantomData<I>,
 }
 
-impl<S, F> Then<S, F> {
+impl<S, F, I> Then<S, F, I> {
     pub fn new(sender: S, func: F) -> Self {
-        Self { sender, func }
+        Self {
+            sender,
+            func,
+            _phantom: PhantomData,
+        }
     }
 }
 
-pub struct ThenReceiver<I, F, R> {
+pub struct ThenReceiver<F, R, I> {
     func: F,
     receiver: R,
     _phantom: PhantomData<I>,
 }
 
-impl<I, F, R, O> SetValue for ThenReceiver<I, F, R>
+impl<F, R, I, O> SetValue for ThenReceiver<F, R, I>
 where
     F: FnOnce(I) -> O,
     R: SetValue<Value = O>,
@@ -44,10 +49,10 @@ where
     }
 }
 
-impl<S, F, R, O> Sender<R> for Then<S, F>
+impl<S, F, I, O, R> Sender<R> for Then<S, F, I>
 where
-    S: Sender<ThenReceiver<S::Output, F, R>>,
-    F: FnOnce(S::Output) -> O,
+    S: Sender<ThenReceiver<F, R, I>>,
+    F: FnOnce(I) -> O,
     R: SetValue<Value = O>,
 {
     type Output = O;
@@ -58,7 +63,7 @@ where
             operation: self.sender.connect(ThenReceiver {
                 func: self.func,
                 receiver,
-                _phantom: Default::default(),
+                _phantom: PhantomData,
             }),
         }
     }
