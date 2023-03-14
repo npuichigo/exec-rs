@@ -72,14 +72,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factories::just::Just;
+    use crate::factories::just;
     use exec_test::receivers::ExpectReceiver;
 
     #[test]
     fn test_then() {
-        let just_sender = Just::new(42);
+        let just_sender = just(42);
         let then_sender = Then::new(just_sender, |x| x + 1);
-        let operation = then_sender.connect(ExpectReceiver::new(43));
+        let then_sender = Then::new(then_sender, |x| x + 1);
+        let then_sender = Then::new(then_sender, |x| x + 1);
+        let operation = then_sender.connect(ExpectReceiver::new(45));
         operation.start();
     }
 }
