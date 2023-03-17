@@ -9,3 +9,6 @@ pub use receiver::Receiver;
 
 mod sender;
 pub use sender::Sender;
+
+mod scheduler;
+pub use scheduler::Scheduler;

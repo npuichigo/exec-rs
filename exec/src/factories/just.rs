@@ -12,16 +12,18 @@ impl<T> Just<T> {
 }
 
 pub struct JustOperation<T, R> {
-    data: T,
-    receiver: R,
+    data: Option<T>,
+    receiver: Option<R>,
 }
 
 impl<T, R> OperationState for JustOperation<T, R>
 where
     R: SetValue<Value = T>,
 {
-    fn start(self) {
-        self.receiver.set_value(self.data);
+    fn start(&mut self) {
+        if let (Some(receiver), Some(data)) = (self.receiver.take(), self.data.take()) {
+            receiver.set_value(data);
+        }
     }
 }
 
@@ -29,13 +31,12 @@ impl<T, R> Sender<R> for Just<T>
 where
     R: SetValue<Value = T>,
 {
-    type Output = T;
     type Operation = JustOperation<T, R>;
 
     fn connect(self, receiver: R) -> Self::Operation {
         JustOperation {
-            data: self.data,
-            receiver,
+            data: Some(self.data),
+            receiver: Some(receiver),
         }
     }
 }
@@ -48,7 +49,7 @@ mod tests {
     #[test]
     fn test_just() {
         let sender = Just::new(42);
-        let operation = sender.connect(ExpectReceiver::new(42));
+        let mut operation = sender.connect(ExpectReceiver::new(42));
         operation.start();
     }
 }

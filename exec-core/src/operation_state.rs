@@ -1,3 +1,3 @@
 pub trait OperationState {
-    fn start(self);
+    fn start(&mut self);
 }

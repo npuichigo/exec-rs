@@ -18,6 +18,7 @@ where
     type Value = T;
 
     fn set_value(self, value: Self::Value) {
+        println!("Expected: {:?}, Actual: {:?}", self.expected, value);
         assert_eq!(self.expected, value);
     }
 }

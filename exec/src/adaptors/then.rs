@@ -44,7 +44,7 @@ impl<O> OperationState for ThenOperation<O>
 where
     O: OperationState,
 {
-    fn start(self) {
+    fn start(&mut self) {
         self.operation.start()
     }
 }
@@ -55,7 +55,6 @@ where
     F: FnOnce(I) -> O,
     R: SetValue<Value = O>,
 {
-    type Output = O;
     type Operation = ThenOperation<S::Operation>;
 
     fn connect(self, receiver: R) -> Self::Operation {
@@ -81,7 +80,7 @@ mod tests {
         let then_sender = Then::new(just_sender, |x| x + 1);
         let then_sender = Then::new(then_sender, |x| x + 1);
         let then_sender = Then::new(then_sender, |x| x + 1);
-        let operation = then_sender.connect(ExpectReceiver::new(45));
+        let mut operation = then_sender.connect(ExpectReceiver::new(45));
         operation.start();
     }
 }

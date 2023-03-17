@@ -1,0 +1,10 @@
+[package]
+name = "exec-executor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+exec-core = { path="../exec-core" }
+
+[dev-dependencies]
+exec-test = { path="../exec-test" }

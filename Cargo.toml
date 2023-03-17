@@ -2,5 +2,6 @@
 members = [
     "exec",
     "exec-core",
+    "exec-executor",
     "exec-test",
 ]
