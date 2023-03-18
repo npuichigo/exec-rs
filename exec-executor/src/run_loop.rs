@@ -182,8 +182,10 @@ mod tests {
         let mut scheduler = run_loop.get_scheduler();
         let sender = scheduler.schedule();
         let mut op = sender.connect(ExpectReceiver::new(()));
+        // Schedule the work on run loop
         op.start();
         run_loop.finish();
+        // Drain the works in run loop
         run_loop.run();
     }
 }
