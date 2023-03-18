@@ -1,6 +1,10 @@
 use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Sender};
 
+pub fn just<T>(value: T) -> Just<T> {
+    Just::new(value)
+}
+
 pub struct Just<T> {
     data: T,
 }

@@ -9,7 +9,7 @@ pub trait SetValue {
 pub trait SetError {
     type Error;
 
-    fn set_error(self, value: Self::Error);
+    fn set_error(self, error: Self::Error);
 }
 
 pub trait SetStopped {

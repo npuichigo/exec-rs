@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 exec-core = { path="../exec-core" }
+exec-executor = { path="../exec-executor" }
 
 [dev-dependencies]
 exec-test = { path="../exec-test" }

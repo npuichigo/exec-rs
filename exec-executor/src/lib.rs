@@ -1,10 +1,4 @@
 #[macro_use]
 mod macros;
-
+pub mod run_loop;
 mod utils;
-
-mod run_loop;
-
-pub trait Executable {
-    fn execute(&mut self);
-}
