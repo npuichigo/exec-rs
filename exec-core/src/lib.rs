@@ -1,6 +1,3 @@
-#![allow(incomplete_features)]
-#![feature(return_position_impl_trait_in_trait)]
-
 mod operation_state;
 pub use operation_state::OperationState;
 

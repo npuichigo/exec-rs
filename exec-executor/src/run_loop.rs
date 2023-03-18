@@ -1,5 +1,4 @@
 use crate::utils::linked_list::{self, LinkedList};
-use crate::Executable;
 use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Scheduler, Sender};
 use std::marker::{PhantomData, PhantomPinned};
@@ -8,10 +7,9 @@ use std::sync::{Condvar, Mutex};
 
 type TaskQueue = LinkedList<Task, <Task as linked_list::Link>::Target>;
 
-pub struct Task {
+struct Task {
     pointers: linked_list::Pointers<Task>,
-    #[allow(dead_code)]
-    operation: NonNull<dyn Executable>,
+    execute: fn(*mut Task),
     _p: PhantomPinned,
 }
 
@@ -23,33 +21,29 @@ generate_addr_of_methods! {
     }
 }
 
+#[repr(C)]
 pub struct Operation<R> {
+    base: Task,
     receiver: Option<R>,
     run_loop: NonNull<RunLoop>,
 }
 
-impl<R> Executable for Operation<R>
+impl<R> Operation<R>
 where
     R: SetValue<Value = ()>,
 {
-    fn execute(&mut self) {
-        println!("execute {:p}", &self);
-        if let Some(receiver) = self.receiver.take() {
+    fn execute(task: *mut Task) {
+        let operation = unsafe { &mut *(task as *mut Operation<R>) };
+        if let Some(receiver) = operation.receiver.take() {
             receiver.set_value(());
         }
     }
 }
 
-/// Storage for a task that is waiting to be executed.
-///
-/// We need to store the Operation along with the Task since there's no inheritance in Rust.
-pub struct TaskOperation<R>(pub Task, pub Operation<R>);
-
-impl<R> OperationState for TaskOperation<R> {
+impl<R> OperationState for Operation<R> {
     fn start(&mut self) {
-        println!("{:p}", &self.1);
         unsafe {
-            self.1.run_loop.as_mut().push_front(NonNull::from(&self.0));
+            self.run_loop.as_mut().push_front(NonNull::from(&self.base));
         }
     }
 }
@@ -102,11 +96,7 @@ impl RunLoop {
     pub fn run(&self) {
         while let Some(mut task) = self.pop_back() {
             unsafe {
-                println!("after {:p}", task.as_ptr());
-                let task = task.as_mut();
-                println!("after {:p}", task.operation.as_ptr());
-                let operation = task.operation.as_mut();
-                operation.execute();
+                (task.as_mut().execute)(task.as_ptr());
             }
         }
     }
@@ -149,21 +139,18 @@ impl<R> Sender<R> for ScheduleTask<R>
 where
     R: SetValue<Value = ()> + 'static,
 {
-    type Operation = TaskOperation<R>;
+    type Operation = Operation<R>;
 
     fn connect(self, receiver: R) -> Self::Operation {
-        let operation = Operation {
+        Operation {
+            base: Task {
+                pointers: linked_list::Pointers::new(),
+                execute: Operation::<R>::execute,
+                _p: PhantomPinned,
+            },
             receiver: Some(receiver),
             run_loop: self.run_loop,
-        };
-        println!("connect {:p}", &operation);
-        let task = Task {
-            pointers: linked_list::Pointers::new(),
-            operation: NonNull::from(&operation),
-            _p: PhantomPinned,
-        };
-        println!("connect {:p}", &task);
-        TaskOperation(task, operation)
+        }
     }
 }
 
@@ -195,7 +182,6 @@ mod tests {
         let mut scheduler = run_loop.get_scheduler();
         let sender = scheduler.schedule();
         let mut op = sender.connect(ExpectReceiver::new(()));
-        println!("start {:p} {:p}", &op.0, &op.1);
         op.start();
         run_loop.finish();
         run_loop.run();
