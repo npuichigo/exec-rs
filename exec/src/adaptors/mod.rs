@@ -1,2 +1,2 @@
-pub mod then;
+mod then;
 pub use then::then;

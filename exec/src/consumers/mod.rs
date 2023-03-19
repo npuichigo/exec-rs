@@ -1,1 +1,2 @@
-pub mod sync_wait;
+mod sync_wait;
+pub use sync_wait::sync_wait;
