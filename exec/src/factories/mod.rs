@@ -1,2 +1,2 @@
-mod just;
-pub use just::{just, Just};
+pub mod just;
+pub use just::just;

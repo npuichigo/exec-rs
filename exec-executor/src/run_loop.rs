@@ -115,7 +115,7 @@ pub struct RunLoopScheduler {
 
 impl<R> Scheduler<R> for RunLoopScheduler
 where
-    R: SetValue<Value = ()> + 'static,
+    R: SetValue<Value = ()>,
 {
     type Sender = ScheduleTask<R>;
 
@@ -137,8 +137,11 @@ pub struct ScheduleTask<R> {
 
 impl<R> Sender<R> for ScheduleTask<R>
 where
-    R: SetValue<Value = ()> + 'static,
+    R: SetValue<Value = ()>,
 {
+    type Value = R::Value;
+    type Error = ();
+
     type Operation = Operation<R>;
 
     fn connect(self, receiver: R) -> Self::Operation {

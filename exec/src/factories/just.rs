@@ -35,6 +35,9 @@ impl<T, R> Sender<R> for Just<T>
 where
     R: SetValue<Value = T>,
 {
+    type Value = R::Value;
+    type Error = ();
+
     type Operation = JustOperation<T, R>;
 
     fn connect(self, receiver: R) -> Self::Operation {

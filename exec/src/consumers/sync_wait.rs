@@ -68,7 +68,10 @@ impl<V, E> SetStopped for SyncWaitReceiver<V, E> {
     }
 }
 
-pub fn sync_wait<S: Sender<SyncWaitReceiver<V, E>>, V, E>(sender: S) -> Result<Option<V>, E> {
+pub fn sync_wait<S, V, E>(sender: S) -> Result<Option<V>, E>
+where
+    S: Sender<SyncWaitReceiver<V, E>, Value = V, Error = E>,
+{
     let run_loop = RunLoop::new();
     let mut state = State::new();
 
@@ -90,11 +93,13 @@ pub fn sync_wait<S: Sender<SyncWaitReceiver<V, E>>, V, E>(sender: S) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factories::{just, Just};
+    use crate::adaptors::then;
+    use crate::factories::just;
 
     #[test]
     fn test_sync_wait() {
         let sender = just(42);
-        println!("{:?}", sync_wait::<Just<i32>, i32, ()>(sender));
+        let sender = then(sender, |v| v + 1);
+        println!("{:?}", sync_wait(sender));
     }
 }

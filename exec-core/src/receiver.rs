@@ -1,5 +1,3 @@
-pub trait Receiver {}
-
 pub trait SetValue {
     type Value;
 
