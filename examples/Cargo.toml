@@ -5,7 +5,12 @@ edition = "2021"
 
 [dev-dependencies]
 exec = { path = "../exec" }
+futures = "0.3"
 
 [[example]]
 name = "hello_world"
 path = "hello_world.rs"
+
+[[example]]
+name = "hello_coro"
+path = "hello_coro.rs"
