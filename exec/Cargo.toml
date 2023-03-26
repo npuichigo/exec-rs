@@ -9,3 +9,4 @@ exec-executor = { path="../exec-executor" }
 
 [dev-dependencies]
 exec-test = { path="../exec-test" }
+futures = "0.3"

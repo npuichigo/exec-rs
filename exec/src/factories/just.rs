@@ -1,5 +1,7 @@
+use crate::consumers::SenderAwaitable;
 use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Sender};
+use std::future::IntoFuture;
 
 pub fn just<T>(value: T) -> Just<T> {
     Just::new(value)
@@ -45,6 +47,15 @@ where
             data: Some(self.data),
             receiver: Some(receiver),
         }
+    }
+}
+
+impl<T> IntoFuture for Just<T> {
+    type Output = Result<Option<T>, ()>;
+    type IntoFuture = SenderAwaitable<Self, T, ()>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        SenderAwaitable::new(self)
     }
 }
 
