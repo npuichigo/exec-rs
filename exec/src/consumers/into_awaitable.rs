@@ -92,14 +92,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::just;
+    use crate::consumers::SenderAwaitable;
+    use crate::{just, then};
     use futures::executor::block_on;
 
     #[test]
     fn test_awaitable() {
         block_on(async {
             let sender = just(1);
-            println!("{:?}", sender.await);
+            let sender = then(sender, |x| x + 1);
+            let awaitable = SenderAwaitable::new(sender);
+            println!("{:?}", awaitable.await);
         });
     }
 }

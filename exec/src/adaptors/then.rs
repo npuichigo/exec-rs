@@ -1,5 +1,6 @@
 use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Sender};
+
 use std::marker::PhantomData;
 
 pub fn then<S, F, I>(sender: S, func: F) -> Then<S, F, I> {
