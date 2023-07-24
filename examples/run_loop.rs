@@ -1,6 +1,6 @@
 use exec::{start_detached, then};
 use exec_core::Scheduler;
-use exec_executor::run_loop::RunLoop;
+use exec_executor::RunLoop;
 
 fn main() {
     let run_loop = RunLoop::new();

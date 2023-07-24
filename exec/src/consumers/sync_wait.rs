@@ -1,6 +1,6 @@
 use exec_core::receiver::{SetError, SetStopped, SetValue};
 use exec_core::{OperationState, Sender};
-use exec_executor::run_loop::RunLoop;
+use exec_executor::RunLoop;
 use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 

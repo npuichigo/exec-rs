@@ -20,3 +20,7 @@ path = "hello_coro.rs"
 [[example]]
 name = "run_loop"
 path = "run_loop.rs"
+
+[[example]]
+name = "single_thread"
+path = "single_thread.rs"
