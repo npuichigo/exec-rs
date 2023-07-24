@@ -5,6 +5,8 @@ edition = "2021"
 
 [dev-dependencies]
 exec = { path = "../exec" }
+exec-core = { path = "../exec-core" }
+exec-executor = { path = "../exec-executor" }
 futures = "0.3"
 
 [[example]]
@@ -14,3 +16,7 @@ path = "hello_world.rs"
 [[example]]
 name = "hello_coro"
 path = "hello_coro.rs"
+
+[[example]]
+name = "run_loop"
+path = "run_loop.rs"
