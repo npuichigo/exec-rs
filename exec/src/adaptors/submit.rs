@@ -1,5 +1,6 @@
 use exec_core::receiver::SetValue;
 use exec_core::{OperationState, Sender};
+use scopeguard::defer;
 use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 
@@ -20,11 +21,13 @@ impl<R: SetValue> SetValue for SubmitReceiver<R> {
 
     fn set_value(self, value: Self::Value) {
         unsafe {
+            defer! {
+                (self.op_state.as_ref().delete_fn)(self.op_state.as_ptr());
+            }
             (*self.op_state.as_ref().receiver.get())
                 .take()
                 .unwrap()
                 .set_value(value);
-            (self.op_state.as_ref().delete_fn)(self.op_state.as_ptr());
         }
     }
 }

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 exec-core = { path="../exec-core" }
 exec-executor = { path="../exec-executor" }
+scopeguard = "1.1"
 
 [dev-dependencies]
 exec-test = { path="../exec-test" }
