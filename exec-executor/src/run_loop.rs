@@ -177,14 +177,14 @@ unsafe impl linked_list::Link for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exec_test::receivers::ExpectReceiver;
+    use exec_test::receivers::ExpectValueReceiver;
 
     #[test]
     fn test_run_loop() {
         let run_loop = RunLoop::new();
         let mut scheduler = run_loop.get_scheduler();
         let sender = scheduler.schedule();
-        let mut op = sender.connect(ExpectReceiver::new(()));
+        let mut op = sender.connect(ExpectValueReceiver::new(()));
         // Schedule the work on run loop
         op.start();
         run_loop.finish();

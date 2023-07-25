@@ -14,7 +14,7 @@ fn main() {
             println!(
                 "Run in thread {:?} loop with value: {}",
                 thread::current().id(),
-                i
+                i,
             );
         }));
     }

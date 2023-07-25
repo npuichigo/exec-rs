@@ -36,11 +36,18 @@ impl<V, E> SetError for StartDetachedReceiver<V, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factories::just;
+    use crate::factories::{just, just_error};
 
     #[test]
     fn test_start_detached() {
         let sender = just(1);
+        start_detached(sender);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_start_detached_with_error() {
+        let sender = just_error("error");
         start_detached(sender);
     }
 }

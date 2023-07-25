@@ -1,4 +1,4 @@
-use exec_core::receiver::SetValue;
+use exec_core::receiver::{SetError, SetValue};
 use exec_core::{OperationState, Sender};
 use scopeguard::defer;
 use std::cell::UnsafeCell;
@@ -28,6 +28,22 @@ impl<R: SetValue> SetValue for SubmitReceiver<R> {
                 .take()
                 .unwrap()
                 .set_value(value);
+        }
+    }
+}
+
+impl<R: SetError> SetError for SubmitReceiver<R> {
+    type Error = R::Error;
+
+    fn set_error(self, error: Self::Error) {
+        unsafe {
+            defer! {
+                (self.op_state.as_ref().delete_fn)(self.op_state.as_ptr());
+            }
+            (*self.op_state.as_ref().receiver.get())
+                .take()
+                .unwrap()
+                .set_error(error);
         }
     }
 }
@@ -71,12 +87,12 @@ where
 mod tests {
     use super::*;
     use crate::factories::just;
-    use exec_test::receivers::ExpectReceiver;
+    use exec_test::receivers::ExpectValueReceiver;
 
     #[test]
     fn test_submit() {
         let just_sender = just(42);
-        let receiver = ExpectReceiver::new(42);
+        let receiver = ExpectValueReceiver::new(42);
         submit(just_sender, receiver);
     }
 }

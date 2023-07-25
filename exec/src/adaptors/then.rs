@@ -57,7 +57,7 @@ where
 impl<S, F, I, O, R> Sender<R> for Then<S, F, I>
 where
     S: Sender<ThenReceiver<F, R, I>>,
-    F: FnOnce(I) -> O,
+    F: FnOnce(I) -> O + Send + 'static,
     R: SetValue<Value = O>,
 {
     type Value = R::Value;
@@ -80,7 +80,7 @@ where
 mod tests {
     use super::*;
     use crate::factories::just;
-    use exec_test::receivers::ExpectReceiver;
+    use exec_test::receivers::ExpectValueReceiver;
 
     #[test]
     fn test_then() {
@@ -88,7 +88,7 @@ mod tests {
         let then_sender = Then::new(just_sender, |x| x + 1);
         let then_sender = Then::new(then_sender, |x| x + 1);
         let then_sender = Then::new(then_sender, |x| x + 1);
-        let mut operation = then_sender.connect(ExpectReceiver::new(45));
+        let mut operation = then_sender.connect(ExpectValueReceiver::new(45));
         operation.start();
     }
 }

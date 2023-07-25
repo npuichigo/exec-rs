@@ -8,12 +8,12 @@ pub fn just<T>(value: T) -> Just<T> {
 }
 
 pub struct Just<T> {
-    data: T,
+    value: T,
 }
 
 impl<T> Just<T> {
     pub fn new(value: T) -> Self {
-        Self { data: value }
+        Self { value }
     }
 }
 
@@ -44,7 +44,7 @@ where
 
     fn connect(self, receiver: R) -> Self::Operation {
         JustOperation {
-            data: Some(self.data),
+            data: Some(self.value),
             receiver: Some(receiver),
         }
     }
@@ -62,12 +62,12 @@ impl<T> IntoFuture for Just<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exec_test::receivers::ExpectReceiver;
+    use exec_test::receivers::ExpectValueReceiver;
 
     #[test]
     fn test_just() {
         let sender = Just::new(42);
-        let mut operation = sender.connect(ExpectReceiver::new(42));
+        let mut operation = sender.connect(ExpectValueReceiver::new(42));
         operation.start();
     }
 }
