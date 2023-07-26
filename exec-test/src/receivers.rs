@@ -34,10 +34,7 @@ impl<E> ExpectErrorReceiver<E> {
     }
 }
 
-impl<E: Error> SetError for ExpectErrorReceiver<E>
-where
-    E: PartialEq,
-{
+impl<E: Error + PartialEq> SetError for ExpectErrorReceiver<E> {
     type Error = E;
 
     fn set_error(self, error: Self::Error) {
