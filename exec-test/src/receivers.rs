@@ -1,4 +1,5 @@
 use exec_core::receiver::{SetError, SetValue};
+use std::error::Error;
 use std::fmt::Debug;
 
 pub struct ExpectValueReceiver<T> {
@@ -33,9 +34,9 @@ impl<E> ExpectErrorReceiver<E> {
     }
 }
 
-impl<E> SetError for ExpectErrorReceiver<E>
+impl<E: Error> SetError for ExpectErrorReceiver<E>
 where
-    E: PartialEq + Debug,
+    E: PartialEq,
 {
     type Error = E;
 

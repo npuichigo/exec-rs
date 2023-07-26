@@ -1,7 +1,8 @@
 use exec_core::receiver::SetError;
 use exec_core::{OperationState, Sender};
+use std::error::Error;
 
-pub fn just_error<E>(error: E) -> JustError<E> {
+pub fn just_error<E: Error>(error: E) -> JustError<E> {
     JustError::new(error)
 }
 
@@ -9,7 +10,7 @@ pub struct JustError<E> {
     error: E,
 }
 
-impl<E> JustError<E> {
+impl<E: Error> JustError<E> {
     pub fn new(error: E) -> Self {
         Self { error }
     }
@@ -51,12 +52,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exec_test::errors::TestError;
     use exec_test::receivers::ExpectErrorReceiver;
 
     #[test]
-    fn test_just() {
-        let sender = JustError::new("error");
-        let mut operation = sender.connect(ExpectErrorReceiver::new("error"));
+    fn test_just_error() {
+        let sender = JustError::new(TestError);
+        let mut operation = sender.connect(ExpectErrorReceiver::new(TestError));
         operation.start();
     }
 }

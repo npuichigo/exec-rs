@@ -2,6 +2,7 @@ use crate::consumers::submit;
 use crate::consumers::submit::SubmitReceiver;
 use exec_core::receiver::{SetError, SetValue};
 use exec_core::Sender;
+use std::error::Error;
 
 pub fn start_detached<S, V, E>(sender: S)
 where
@@ -25,11 +26,14 @@ impl<V, E> SetValue for StartDetachedReceiver<V, E> {
     fn set_value(self, _value: Self::Value) {}
 }
 
-impl<V, E> SetError for StartDetachedReceiver<V, E> {
+impl<V, E: Error> SetError for StartDetachedReceiver<V, E> {
     type Error = E;
 
-    fn set_error(self, _error: Self::Error) {
-        panic!("StartDetachedReceiver::set_error");
+    fn set_error(self, error: Self::Error) {
+        panic!(
+            "StartDetachedReceiver::set_error called with error: {:?}",
+            error
+        );
     }
 }
 
@@ -37,6 +41,7 @@ impl<V, E> SetError for StartDetachedReceiver<V, E> {
 mod tests {
     use super::*;
     use crate::factories::{just, just_error};
+    use exec_test::errors::TestError;
 
     #[test]
     fn test_start_detached() {
@@ -47,7 +52,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_start_detached_with_error() {
-        let sender = just_error("error");
+        let sender = just_error(TestError);
         start_detached(sender);
     }
 }

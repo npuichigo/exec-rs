@@ -5,7 +5,7 @@ pub trait SetValue {
 }
 
 pub trait SetError {
-    type Error;
+    type Error: std::error::Error;
 
     fn set_error(self, error: Self::Error);
 }

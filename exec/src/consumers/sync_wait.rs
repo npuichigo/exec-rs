@@ -2,6 +2,7 @@ use exec_core::receiver::{SetError, SetStopped, SetValue};
 use exec_core::{OperationState, Sender};
 use exec_executor::RunLoop;
 use std::cell::UnsafeCell;
+use std::error::Error;
 use std::ptr::NonNull;
 
 struct State<V, E> {
@@ -48,7 +49,7 @@ impl<V, E> SetValue for SyncWaitReceiver<V, E> {
     }
 }
 
-impl<V, E> SetError for SyncWaitReceiver<V, E> {
+impl<V, E: Error> SetError for SyncWaitReceiver<V, E> {
     type Error = E;
 
     fn set_error(self, error: Self::Error) {
