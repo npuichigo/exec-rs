@@ -1,9 +1,42 @@
-[workspace]
-resolver = "2"
-members = [
-    "exec",
-    "exec-core",
-    "exec-executor",
-    "exec-test",
-    "examples",
-]
+[package]
+name = "exec-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust implementation of C++ std::execution (P2300)"
+license = "Apache-2.0"
+repository = "https://github.com/yuchao/exec-rs"
+keywords = ["async", "execution", "sender", "receiver", "p2300"]
+categories = ["asynchronous", "concurrency"]
+
+[dependencies]
+pin-project-lite = "0.2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+static_assertions = "1.1"
+tokio = { version = "1", features = ["full"] }
+mio = { version = "1", features = ["os-poll", "net"] }
+
+[features]
+default = []
+std = []
+
+[[example]]
+name = "tokio_echo"
+path = "examples/tokio_echo.rs"
+
+[[example]]
+name = "exec_echo"
+path = "examples/exec_echo.rs"
+
+[[example]]
+name = "exec_echo_mio"
+path = "examples/exec_echo_mio.rs"
+
+[[example]]
+name = "exec_echo_mt"
+path = "examples/exec_echo_mt.rs"
+
+[lints.rust]
+unsafe_code = "warn"
