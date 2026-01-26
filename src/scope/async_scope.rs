@@ -3,10 +3,10 @@
 //! AsyncScope provides structured concurrency by tracking sender lifetimes
 //! and ensuring all nested work completes before the scope is destroyed.
 
-use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource, StopToken};
+use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 
 /// A full async scope for structured concurrency.
 ///
@@ -71,7 +71,8 @@ impl AsyncScope {
     /// The sender is nested and started immediately. The result is discarded.
     pub fn spawn<S>(&self, sender: S)
     where
-        S: crate::traits::Sender + crate::traits::SenderTo<super::NestReceiver<crate::consumers::DetachedReceiver>>,
+        S: crate::traits::Sender
+            + crate::traits::SenderTo<super::NestReceiver<crate::consumers::DetachedReceiver>>,
     {
         use crate::consumers::start_detached;
         start_detached(self.nest(sender));

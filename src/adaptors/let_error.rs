@@ -1,8 +1,8 @@
 //! LetError adaptor - handle errors with a function that returns a sender.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::{pin, Pin};

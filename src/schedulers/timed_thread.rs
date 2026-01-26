@@ -69,7 +69,7 @@ struct TimedThreadState {
 /// A scheduled operation in the heap.
 struct TimedOperation {
     when: Instant,
-    counter: u64, // For stable ordering when times are equal
+    counter: u64,                           // For stable ordering when times are equal
     callback: Box<dyn FnOnce(bool) + Send>, // true = value, false = stopped
 }
 
@@ -136,7 +136,10 @@ impl TimedThreadContext {
             let mut state = inner.state.lock();
 
             // Check for stop request
-            if inner.stop_requested.load(std::sync::atomic::Ordering::Relaxed) {
+            if inner
+                .stop_requested
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 // Cancel all pending operations
                 while let Some(Reverse(op)) = state.heap.pop() {
                     drop(state);

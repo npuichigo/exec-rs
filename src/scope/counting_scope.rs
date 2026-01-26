@@ -4,7 +4,6 @@
 //! a `when_empty` sender that completes when all work is done.
 
 use crate::consumers::start_detached;
-use crate::factories::just;
 use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource, StopToken};
 use crate::traits::{
     CompletionSignatures, Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError,
@@ -73,10 +72,7 @@ impl CountingScope {
         };
 
         // Start the sender
-        start_detached(ScopedSender {
-            sender,
-            receiver,
-        });
+        start_detached(ScopedSender { sender, receiver });
     }
 
     /// Returns a sender that completes when the scope is empty.

@@ -218,7 +218,8 @@ where
     }
 }
 
-impl<S> ReceiverOfError<<S::Completions as CompletionSignatures>::Error> for EnsureStartedReceiver<S>
+impl<S> ReceiverOfError<<S::Completions as CompletionSignatures>::Error>
+    for EnsureStartedReceiver<S>
 where
     S: Sender + Send + 'static,
     <S::Completions as CompletionSignatures>::Value: Send,

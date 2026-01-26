@@ -3,8 +3,8 @@
 //! `into_tuple` transforms a sender's value from `V` to `(V,)`.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;

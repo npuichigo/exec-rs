@@ -9,15 +9,15 @@
 //! - [`Scheduler`]: Creates senders that execute on specific contexts
 
 mod completion;
-mod receiver;
-mod sender;
-mod operation;
-mod scheduler;
 mod env;
+mod operation;
+mod receiver;
+mod scheduler;
+mod sender;
 
 pub use completion::*;
-pub use receiver::*;
-pub use sender::*;
-pub use operation::*;
-pub use scheduler::*;
 pub use env::*;
+pub use operation::*;
+pub use receiver::*;
+pub use scheduler::*;
+pub use sender::*;

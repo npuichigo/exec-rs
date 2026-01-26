@@ -1,8 +1,8 @@
 //! Inline scheduler - executes work immediately on the calling thread.
 
 use crate::traits::{
-    CompletionSignatures, InlineSchedulerMarker, OperationState, Receiver, ReceiverOf,
-    Scheduler, Sender, SenderTo,
+    CompletionSignatures, InlineSchedulerMarker, OperationState, ReceiverOf, Scheduler, Sender,
+    SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;

@@ -4,8 +4,8 @@
 //! stopped, it instead completes with an error.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -111,7 +111,7 @@ impl<R, V, E, SE> ReceiverOfError<SE> for StoppedAsErrorReceiver<R, V, E>
 where
     R: ReceiverOfError<E>,
 {
-    fn set_error(mut self, _error: SE) {
+    fn set_error(self, _error: SE) {
         // Note: This converts from SE to E, which requires the upstream error type
         // to be compatible. In practice, this adaptor is typically used when both
         // error types are the same.

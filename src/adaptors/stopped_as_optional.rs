@@ -5,8 +5,8 @@
 //! the value is wrapped in `Some`.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;

@@ -31,14 +31,14 @@
 //! assert!(called.load(std::sync::atomic::Ordering::SeqCst));
 //! ```
 
-mod token;
-mod source;
-mod inplace;
 mod callback;
+mod inplace;
 mod never;
+mod source;
+mod token;
 
-pub use token::*;
-pub use source::*;
-pub use inplace::*;
 pub use callback::*;
+pub use inplace::*;
 pub use never::*;
+pub use source::*;
+pub use token::*;

@@ -86,9 +86,7 @@ echo ""
 
 # Run benchmarks for each server
 run_server_benchmark "Tokio Echo Server" "tokio_echo"
-run_server_benchmark "exec-rs Multi-threaded" "exec_echo_mt"
-run_server_benchmark "exec-rs Blocking IO" "exec_echo"
-run_server_benchmark "exec-rs Mio (single-threaded)" "exec_echo_mio"
+run_server_benchmark "exec-rs Async (sender/receiver + AsyncScope)" "exec_echo_async"
 
 echo ""
 echo "========================================"

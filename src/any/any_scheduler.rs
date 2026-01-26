@@ -1,6 +1,6 @@
 //! Type-erased scheduler.
 
-use crate::any::{AnySender, AnyReceiverRef};
+use crate::any::{AnyReceiverRef, AnySender};
 use crate::traits::{CompletionSignatures, Scheduler, SenderTo};
 use std::fmt;
 use std::sync::Arc;
@@ -43,7 +43,8 @@ impl AnyScheduler {
         <S::Sender as crate::traits::Sender>::Completions:
             CompletionSignatures<Value = (), Error = std::convert::Infallible>,
         S::Sender: for<'a> SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>,
-        for<'a> <S::Sender as SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>>::Operation: Send,
+        for<'a> <S::Sender as SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>>::Operation:
+            Send,
     {
         AnyScheduler {
             inner: Arc::new(SchedulerWrapper { scheduler }),
@@ -83,7 +84,8 @@ where
     <S::Sender as crate::traits::Sender>::Completions:
         CompletionSignatures<Value = (), Error = std::convert::Infallible>,
     S::Sender: for<'a> SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>,
-    for<'a> <S::Sender as SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>>::Operation: Send,
+    for<'a> <S::Sender as SenderTo<AnyReceiverRef<'a, (), std::convert::Infallible>>>::Operation:
+        Send,
 {
     fn schedule_erased(&self) -> AnySender<(), std::convert::Infallible> {
         AnySender::new(self.scheduler.schedule())

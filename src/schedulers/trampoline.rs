@@ -4,8 +4,8 @@
 //! When the limit is exceeded, work is queued and drained iteratively.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfStopped, Scheduler,
-    Sender, SenderTo,
+    CompletionSignatures, OperationState, ReceiverOf, ReceiverOfStopped, Scheduler, Sender,
+    SenderTo,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -66,6 +66,88 @@ impl Default for TrampolineScheduler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Submit work to the trampoline, preventing stack overflow from recursive calls.
+///
+/// This function is useful for implementing sender adaptors that need to
+/// start the next iteration from within a completion handler.
+///
+/// If called from within a trampoline context and the depth limit is exceeded,
+/// the work is queued and executed later. Otherwise, the work is executed inline.
+///
+/// # Example
+///
+/// ```rust
+/// use exec_rs::schedulers::trampoline_submit;
+///
+/// fn recursive_work(remaining: usize) {
+///     if remaining > 0 {
+///         trampoline_submit(move || {
+///             recursive_work(remaining - 1);
+///         });
+///     }
+/// }
+///
+/// // This won't overflow the stack even with large values
+/// recursive_work(10000);
+/// ```
+pub fn trampoline_submit<F: FnOnce() + 'static>(work: F) {
+    TRAMPOLINE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+
+        if borrow.is_none() {
+            // No trampoline context - create one and execute
+            *borrow = Some(TrampolineState {
+                max_depth: DEFAULT_MAX_DEPTH,
+                current_depth: 1,
+                queue: VecDeque::new(),
+            });
+            drop(borrow);
+
+            // Execute the work
+            work();
+
+            // Drain any queued work
+            loop {
+                let queued_work = TRAMPOLINE.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    if let Some(state) = borrow.as_mut() {
+                        state.queue.pop_front()
+                    } else {
+                        None
+                    }
+                });
+
+                match queued_work {
+                    Some(queued_work) => queued_work(),
+                    None => break,
+                }
+            }
+
+            // Clean up state
+            TRAMPOLINE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        } else {
+            // Already in trampoline context - check depth
+            let state = borrow.as_mut().unwrap();
+            if state.current_depth < state.max_depth {
+                // Execute inline
+                state.current_depth += 1;
+                drop(borrow);
+                work();
+                TRAMPOLINE.with(|cell| {
+                    if let Some(state) = cell.borrow_mut().as_mut() {
+                        state.current_depth -= 1;
+                    }
+                });
+            } else {
+                // Queue for later execution
+                state.queue.push_back(Box::new(work));
+            }
+        }
+    });
 }
 
 impl PartialEq for TrampolineScheduler {
@@ -238,8 +320,8 @@ mod tests {
 
     #[test]
     fn test_trampoline_deep_recursion() {
-        use std::pin::pin;
         use crate::consumers::DetachedEnv;
+        use std::pin::pin;
 
         // Test that deep recursion doesn't overflow the stack
         let scheduler = TrampolineScheduler::with_max_depth(4);

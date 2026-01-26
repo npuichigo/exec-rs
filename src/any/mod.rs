@@ -45,10 +45,10 @@
 //! assert_eq!(sync_wait(get_any_sender(false)).unwrap(), 100);
 //! ```
 
-mod any_sender;
 mod any_scheduler;
+mod any_sender;
 mod variant_sender;
 
-pub use any_sender::*;
 pub use any_scheduler::*;
+pub use any_sender::*;
 pub use variant_sender::*;

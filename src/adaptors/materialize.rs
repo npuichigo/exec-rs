@@ -4,8 +4,8 @@
 //! into a single value completion containing a `Completion<V, E>` enum.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;

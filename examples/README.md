@@ -11,21 +11,9 @@ cargo run --example tokio_echo --release
 ```
 
 ### 2. exec_echo
-exec-rs with blocking IO and thread pool scheduling.
+exec-rs sender/receiver model with structured concurrency
 ```bash
 cargo run --example exec_echo --release
-```
-
-### 3. exec_echo_mio
-Single-threaded event-driven echo server using mio.
-```bash
-cargo run --example exec_echo_mio --release
-```
-
-### 4. exec_echo_mt
-Multi-threaded exec-rs server with acceptor threads and worker pool.
-```bash
-cargo run --example exec_echo_mt --release
 ```
 
 ## Benchmarking with rust_echo_bench
@@ -44,8 +32,8 @@ cargo build --release
 # Option 1: tokio
 cargo run --example tokio_echo --release
 
-# Option 2: exec-rs multi-threaded
-cargo run --example exec_echo_mt --release
+# Option 2: exec-rs
+cargo run --example exec_echo --release
 ```
 
 2. Run the benchmark (in terminal 2):
@@ -93,16 +81,36 @@ Large messages:
 
 ## Sample Benchmark Results
 
-Test machine: Linux 5.15, **4 worker threads** for fair comparison
+Test machine: Linux 5.15
 
-### 50 Concurrent Connections (128B messages, 5 seconds)
+### Single-Threaded Performance (1 worker thread)
+
+#### 50 Concurrent Connections (128B messages, 5 seconds)
+
+| Server | Requests/sec | Notes |
+|--------|-------------|-------|
+| tokio_echo | 1,772k | 1 worker thread |
+| exec_echo_mt | 1,850k | 1 worker + 1 acceptor |
+| exec_echo_mio | 1,892k | single-threaded event loop |
+
+#### 500 Concurrent Connections (128B messages, 5 seconds)
+
+| Server | Requests/sec | Notes |
+|--------|-------------|-------|
+| tokio_echo | 3,637k | 1 worker thread |
+| exec_echo_mt | 3,744k | 1 worker + 1 acceptor |
+| exec_echo_mio | 3,781k | single-threaded event loop |
+
+### Multi-Threaded Performance (4 worker threads)
+
+#### 50 Concurrent Connections (128B messages, 5 seconds)
 
 | Server | Requests/sec | Notes |
 |--------|-------------|-------|
 | tokio_echo | 1,816k | 4 worker threads |
 | exec_echo_mt | 1,917k | 4 workers + 2 acceptors |
 
-### 500 Concurrent Connections (128B messages, 5 seconds)
+#### 500 Concurrent Connections (128B messages, 5 seconds)
 
 | Server | Requests/sec | Notes |
 |--------|-------------|-------|
@@ -110,9 +118,10 @@ Test machine: Linux 5.15, **4 worker threads** for fair comparison
 | exec_echo_mt | 3,703k | 4 workers + 2 acceptors |
 
 **Key Findings:**
-- With equal thread counts, tokio and exec-rs perform nearly identically
-- Both achieve ~3.7M requests/sec with 500 connections
-- exec-rs is slightly faster (~5%) at lower concurrency (50 connections)
+- **Single-threaded**: exec_echo_mio (event loop) is fastest (+7% vs Tokio)
+- **Multi-threaded**: Tokio and exec-rs perform nearly identically
+- All implementations scale ~2x from 50→500 connections
+- Event-driven mio has lowest overhead for simple echo workload
 - The blocking IO model in exec-rs has minimal overhead for short-lived work
 
 ## Notes

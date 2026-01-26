@@ -4,7 +4,7 @@
 //! into a tuple. If any sender fails or is stopped, the entire operation fails
 //! or stops.
 
-use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource, StopToken};
+use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource};
 use crate::traits::{
     CompletionSignatures, Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError,
     ReceiverOfStopped, Sender, SenderTo,
@@ -402,7 +402,11 @@ mod tests {
 
     #[test]
     fn test_when_all_strings() {
-        let result = sync_wait(when_all(just("first".to_string()), just("second".to_string()))).unwrap();
+        let result = sync_wait(when_all(
+            just("first".to_string()),
+            just("second".to_string()),
+        ))
+        .unwrap();
         assert_eq!(result, ("first".to_string(), "second".to_string()));
     }
 

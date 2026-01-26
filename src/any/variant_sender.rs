@@ -5,8 +5,8 @@
 //! static typing for the completion signatures.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, ReceiverOf, ReceiverOfError, ReceiverOfStopped, Sender,
+    SenderTo,
 };
 use std::pin::Pin;
 
@@ -43,7 +43,9 @@ use std::pin::Pin;
 /// ```
 #[derive(Debug, Clone)]
 pub enum VariantSender2<S1, S2> {
+    /// The first sender variant.
     First(S1),
+    /// The second sender variant.
     Second(S2),
 }
 
@@ -79,8 +81,7 @@ where
 {
     type Value = V;
     type Error = E;
-    const SENDS_STOPPED: bool =
-        S1::Completions::SENDS_STOPPED || S2::Completions::SENDS_STOPPED;
+    const SENDS_STOPPED: bool = S1::Completions::SENDS_STOPPED || S2::Completions::SENDS_STOPPED;
 }
 
 impl<S1, S2, V, E, R> SenderTo<R> for VariantSender2<S1, S2>
@@ -101,7 +102,9 @@ where
 
 /// Operation state for VariantSender2.
 pub enum VariantOperation2<Op1, Op2> {
+    /// Operation for the first variant.
     First(Op1),
+    /// Operation for the second variant.
     Second(Op2),
 }
 
@@ -123,20 +126,26 @@ impl<Op1: OperationState, Op2: OperationState> OperationState for VariantOperati
 /// A sender that can be one of three types.
 #[derive(Debug, Clone)]
 pub enum VariantSender3<S1, S2, S3> {
+    /// The first sender variant.
     First(S1),
+    /// The second sender variant.
     Second(S2),
+    /// The third sender variant.
     Third(S3),
 }
 
 impl<S1, S2, S3> VariantSender3<S1, S2, S3> {
+    /// Create a variant sender from the first type.
     pub fn first(sender: S1) -> Self {
         VariantSender3::First(sender)
     }
 
+    /// Create a variant sender from the second type.
     pub fn second(sender: S2) -> Self {
         VariantSender3::Second(sender)
     }
 
+    /// Create a variant sender from the third type.
     pub fn third(sender: S3) -> Self {
         VariantSender3::Third(sender)
     }
@@ -189,8 +198,11 @@ where
 
 /// Operation state for VariantSender3.
 pub enum VariantOperation3<Op1, Op2, Op3> {
+    /// Operation for the first variant.
     First(Op1),
+    /// Operation for the second variant.
     Second(Op2),
+    /// Operation for the third variant.
     Third(Op3),
 }
 
@@ -215,25 +227,33 @@ impl<Op1: OperationState, Op2: OperationState, Op3: OperationState> OperationSta
 /// A sender that can be one of four types.
 #[derive(Debug, Clone)]
 pub enum VariantSender4<S1, S2, S3, S4> {
+    /// The first sender variant.
     First(S1),
+    /// The second sender variant.
     Second(S2),
+    /// The third sender variant.
     Third(S3),
+    /// The fourth sender variant.
     Fourth(S4),
 }
 
 impl<S1, S2, S3, S4> VariantSender4<S1, S2, S3, S4> {
+    /// Create a variant sender from the first type.
     pub fn first(sender: S1) -> Self {
         VariantSender4::First(sender)
     }
 
+    /// Create a variant sender from the second type.
     pub fn second(sender: S2) -> Self {
         VariantSender4::Second(sender)
     }
 
+    /// Create a variant sender from the third type.
     pub fn third(sender: S3) -> Self {
         VariantSender4::Third(sender)
     }
 
+    /// Create a variant sender from the fourth type.
     pub fn fourth(sender: S4) -> Self {
         VariantSender4::Fourth(sender)
     }
@@ -277,8 +297,7 @@ where
     S4: Sender<Completions: CompletionSignatures<Value = V, Error = E>> + SenderTo<R>,
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
-    type Operation =
-        VariantOperation4<S1::Operation, S2::Operation, S3::Operation, S4::Operation>;
+    type Operation = VariantOperation4<S1::Operation, S2::Operation, S3::Operation, S4::Operation>;
 
     fn connect(self, receiver: R) -> Self::Operation {
         match self {
@@ -292,9 +311,13 @@ where
 
 /// Operation state for VariantSender4.
 pub enum VariantOperation4<Op1, Op2, Op3, Op4> {
+    /// Operation for the first variant.
     First(Op1),
+    /// Operation for the second variant.
     Second(Op2),
+    /// Operation for the third variant.
     Third(Op3),
+    /// Operation for the fourth variant.
     Fourth(Op4),
 }
 

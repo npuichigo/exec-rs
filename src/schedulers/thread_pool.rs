@@ -3,7 +3,7 @@
 //! Provides a fixed-size thread pool for parallel work execution.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, Scheduler, Sender, SenderTo,
+    CompletionSignatures, OperationState, ReceiverOf, Scheduler, Sender, SenderTo,
 };
 use crossbeam_channel::{bounded, Receiver as ChannelReceiver, Sender as ChannelSender};
 use std::pin::Pin;
@@ -101,7 +101,10 @@ impl StaticThreadPool {
         // Use select to wait for either a task or stop signal
         loop {
             // Try to receive work, but check stop flag periodically
-            match inner.receiver.recv_timeout(std::time::Duration::from_millis(10)) {
+            match inner
+                .receiver
+                .recv_timeout(std::time::Duration::from_millis(10))
+            {
                 Ok(task) => {
                     task();
                 }

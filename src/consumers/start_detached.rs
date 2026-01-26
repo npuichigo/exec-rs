@@ -3,11 +3,11 @@
 //! `start_detached` starts a sender and immediately returns, without waiting
 //! for completion. The sender runs to completion independently.
 
+use crate::stop::NeverStopToken;
 use crate::traits::{
     Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped, Sender,
     SenderTo,
 };
-use crate::stop::NeverStopToken;
 use std::pin::Pin;
 
 /// Start a sender and detach, not waiting for completion.

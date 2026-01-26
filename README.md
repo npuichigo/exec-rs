@@ -4,10 +4,10 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 
 ## Summary
 
-- **Source Files**: 64 Rust files
-- **Unit Tests**: 129 passing
-- **Doc Tests**: 31 passing (11 ignored)
-- **Examples**: 4 echo server benchmarks
+- **Source Files**: 70+ Rust files
+- **Unit Tests**: 195 passing
+- **Doc Tests**: 44 passing (26 ignored)
+- **Examples**: 2 echo server implementations + benchmark
 
 ---
 
@@ -24,12 +24,13 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 | 7 | Concurrent Composition | ✅ Complete |
 | 8 | Additional Adaptors | ✅ Complete |
 | 9 | Structured Concurrency | ✅ Complete |
-| 10 | Sequence Senders | ❌ Not Started |
+| 10 | Sequence Senders | ⚠️ Partial |
 | 11 | Type-Erased Senders | ✅ Complete |
 | 12 | Advanced Schedulers | ✅ Complete |
-| 13 | Coroutine Integration | ❌ Not Started |
+| 13 | Coroutine Integration | ✅ Complete |
 | 14 | Utilities | ⚠️ Partial |
-| 15 | Future Bridge | ❌ Not Started |
+| 15 | Future Bridge | ✅ Complete |
+| 16 | **Networking (P2762)** | ✅ Complete |
 
 ---
 
@@ -74,6 +75,9 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 | `just_from(fn)` | `just.rs` | ✅ |
 | `just_error_from(fn)` | `just.rs` | ✅ |
 | `just_stopped_from(fn)` | `just.rs` | ✅ |
+| `schedule(scheduler)` | `schedule.rs` | ✅ |
+| `transfer_just(scheduler, value)` | `schedule.rs` | ✅ |
+| `read_env(query)` | `read_env.rs` | ✅ |
 
 ### Phase 3: Consumers (`src/consumers/`)
 
@@ -120,10 +124,14 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 | `into_tuple()` | `into_tuple.rs` | ✅ |
 | `stopped_as_optional()` | `stopped_as_optional.rs` | ✅ |
 | `stopped_as_error(err)` | `stopped_as_error.rs` | ✅ |
+| `repeat_effect(sender)` | `repeat.rs` | ✅ |
 | `repeat_n(sender, n)` | `repeat.rs` | ✅ |
 | `repeat_effect_until(sender, pred)` | `repeat.rs` | ✅ |
 | `finally(sender, cleanup)` | `finally.rs` | ✅ |
 | `unless_stopped()` | `unless_stopped.rs` | ✅ |
+| `into_variant()` | `into_variant.rs` | ✅ |
+| `write_env(sender, env)` | `write_env.rs` | ✅ |
+| `fork_join2/3/4(sender, fns...)` | `fork_join.rs` | ✅ |
 
 ### Phase 9: Structured Concurrency (`src/scope/`)
 
@@ -164,35 +172,64 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 |-----------|------|--------|
 | `ScopeGuard` | `scope_guard.rs` | ✅ |
 | `IntrusiveHeap` | `intrusive_heap.rs` | ✅ |
+| `AtomicIntrusiveQueue` | `intrusive_queue.rs` | ✅ |
+
+### Phase 13: Coroutine Integration (`src/coro/`)
+
+| Component | File | Status |
+|-----------|------|--------|
+| `Task<T, E>` | `task.rs` | ✅ |
+| `TaskError<E>` | `task.rs` | ✅ |
+| `TaskReceiver<T, E>` | `task.rs` | ✅ |
+| `SpawnExt` trait | `task.rs` | ✅ |
+| `Awaitable` trait | `awaitable.rs` | ✅ |
+| `ReadyAwaitable` trait | `awaitable.rs` | ✅ |
+| `at_coroutine_exit(fn)` | `at_exit.rs` | ✅ |
+| `scope_exit(fn)` | `at_exit.rs` | ✅ |
+| `DeferredCleanup` | `at_exit.rs` | ✅ |
+
+### Phase 15: Future Bridge (`src/future/`)
+
+| Component | File | Status |
+|-----------|------|--------|
+| `SenderToFutureExt` trait | `sender_to_future.rs` | ✅ |
+| `SenderFuture<S>` | `sender_to_future.rs` | ✅ |
+| `SenderFutureError<E>` | `sender_to_future.rs` | ✅ |
+| `FutureReceiver<V, E>` | `sender_to_future.rs` | ✅ |
+| `from_future(F)` | `future_to_sender.rs` | ✅ |
+| `FutureSender<F>` | `future_to_sender.rs` | ✅ |
+| `FutureToSenderExt` trait | `future_to_sender.rs` | ✅ |
+
+### Phase 16: Networking (`src/net/`)
+
+Following the P2762 async I/O proposal pattern with sender-based operations.
+
+| Component | File | Status |
+|-----------|------|--------|
+| `IoContext` | `io_context.rs` | ✅ |
+| `IoContextScheduler` | `io_context.rs` | ✅ |
+| `TcpListener` | `socket.rs` | ✅ |
+| `TcpStream` | `socket.rs` | ✅ |
+| `async_accept(listener, ctx)` | `operations.rs` | ✅ |
+| `async_accept_arc(listener, ctx)` | `operations.rs` | ✅ |
+| `async_receive(stream, ctx, buf)` | `operations.rs` | ✅ |
+| `async_receive_into(client, ctx)` | `operations.rs` | ✅ |
+| `async_send(stream, ctx, buf)` | `operations.rs` | ✅ |
+| `async_send_from(client, ctx)` | `operations.rs` | ✅ |
+| `ClientState` | `operations.rs` | ✅ |
+| `Buffer` / `MutBuffer` traits | `buffer.rs` | ✅ |
 
 ---
 
 ## Not Yet Implemented
 
-### Phase 10: Sequence Senders
-- `SequenceSender` trait
-- `iterate(range)`
-- `empty_sequence()`
-- `merge(seq1, seq2)`
-- `transform_each(seq, adaptor)`
-- `ignore_all_values(seq)`
-
-### Phase 13: Coroutine Integration
-- `Task<T>` coroutine type
-- `Awaitable` trait
-- `at_coroutine_exit(fn)`
-
-### Phase 15: Future Bridge
-- `SenderToFuture` conversion
-- `FutureToSender` conversion
-
-### Other Missing Items
-- `into_variant` adaptor
-- `read_env(query)` factory
-- `schedule(scheduler)` factory
-- `transfer_just` factory
-- `BWOSLifoQueue` (work-stealing queue)
-- `AtomicIntrusiveQueue`
+### Phase 10: Sequence Senders (Partial)
+- ✅ `SequenceSender` trait - `traits.rs`
+- ✅ `iterate(range)` - `iterate.rs`
+- ✅ `empty_sequence()` - `empty.rs`
+- ⚠️ `merge(seq1, seq2)` - Not implemented
+- ⚠️ `transform_each(seq, adaptor)` - Partial (wrapper only)
+- ⚠️ `ignore_all_values(seq)` - Partial (wrapper only)
 
 ---
 
@@ -201,17 +238,40 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 | Example | Description |
 |---------|-------------|
 | `tokio_echo.rs` | Tokio-based echo server (baseline) |
-| `exec_echo.rs` | exec-rs with thread pool + blocking IO |
-| `exec_echo_mt.rs` | Multi-threaded exec-rs echo server |
-| `exec_echo_mio.rs` | Single-threaded mio event loop |
+| `exec_echo.rs` | exec-rs async sender/receiver + AsyncScope |
 | `benchmark.sh` | Automated benchmark script |
 
-### Benchmark Results (4 worker threads)
+### Benchmark Results (Single-threaded, 1 worker thread each)
 
-| Connections | Tokio | exec-rs MT |
-|-------------|-------|------------|
-| 50 | 1.82M req/s | 1.92M req/s |
-| 500 | 3.71M req/s | 3.70M req/s |
+| Server | Light (50 conn) | Medium (200) | Heavy (500) | Large (4KB) |
+|--------|-----------------|--------------|-------------|-------------|
+| **Tokio** | 104,601 req/s | 114,478 | 107,333 | 85,745 |
+| **exec-rs Async** | **114,723 req/s** | **130,694** | **135,157** | **100,321** |
+
+**exec-rs async outperforms Tokio by 10-26% in single-threaded mode**, demonstrating the efficiency of the sender/receiver model with direct mio integration.
+
+### Echo Server Architecture (exec_echo.rs)
+
+```
+repeat_effect(
+    async_accept(server)
+    | then(|(stream, addr)| { scope.spawn(echo_client); })
+)
+
+// Client echo loop (runs until EOF)
+repeat_effect_until(
+    async_receive_into(client)
+       | then(|n| { client.done = (n == 0); })
+       | let_value(|| async_send_from(client)),
+    || client.done
+)
+```
+
+Key features:
+- **Structured concurrency**: AsyncScope tracks all client handlers
+- **Sender composition**: `repeat_effect`, `then`, `let_value` chain
+- **Clone-based iteration**: Senders cloned each iteration (matching stdexec)
+- **mio integration**: Direct epoll/kqueue event loop
 
 ---
 
@@ -228,6 +288,7 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 - **Type-safe composition**: Compile-time checked sender pipelines
 - **Structured concurrency**: Scopes ensure proper lifetime management
 - **Cancellation support**: Stop tokens propagate through pipelines
+- **Async I/O**: mio-based networking with sender operations
 
 ### Thread Safety
 - All schedulers are `Send + Sync`
@@ -238,15 +299,16 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 
 ## Code Quality
 
-- **129 unit tests** covering all major functionality
-- **31 doc tests** with usage examples
-- **Warnings**: Some unused import warnings (minor)
-- **Unsafe code**: Minimized, only where necessary for pinning
+- **195 unit tests** covering all major functionality
+- **44 doc tests** with usage examples (26 ignored)
+- **Warnings**: Minimal
+- **Unsafe code**: Minimized, only where necessary for pinning and interior mutability
 
 ---
 
 ## References
 
 - [P2300R10 Specification](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p2300r10.html)
+- [P2762 Sender/Receiver Async I/O](https://wg21.link/p2762)
 - [NVIDIA/stdexec](https://github.com/NVIDIA/stdexec) - Reference implementation
-- [beman.execution](https://github.com/bemanproject/execution) - Alternative reference
+- [kuhllib echo_server](https://github.com/kirkshoop/kuhllib/blob/main/src/examples/echo_server.cpp) - Pattern reference

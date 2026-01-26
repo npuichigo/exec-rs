@@ -1,8 +1,8 @@
 //! LetValue adaptor - chain with a function that returns a sender.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::{pin, Pin};
@@ -56,10 +56,7 @@ where
     F: FnOnce(V) -> S2,
     S2: Sender,
 {
-    type Completions = LetValueCompletions<
-        <S2::Completions as CompletionSignatures>::Value,
-        E,
-    >;
+    type Completions = LetValueCompletions<<S2::Completions as CompletionSignatures>::Value, E>;
 }
 
 impl<S, F, S2, R, V, E> SenderTo<R> for LetValue<S, F>
@@ -71,15 +68,14 @@ where
     R: ReceiverOf<<S2::Completions as CompletionSignatures>::Value>
         + ReceiverOfError<E>
         + ReceiverOfError<<S2::Completions as CompletionSignatures>::Error>
-        + ReceiverOfStopped
-        + Clone,
+        + ReceiverOfStopped,
 {
     type Operation = LetValueOperation<S, F, S2, R, E>;
 
     fn connect(self, receiver: R) -> Self::Operation {
         let inner_receiver = LetValueReceiver {
             f: Some(self.f),
-            receiver: receiver.clone(),
+            receiver,
             _phantom: PhantomData,
         };
         LetValueOperation {

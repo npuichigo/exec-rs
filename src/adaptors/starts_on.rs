@@ -44,8 +44,9 @@ where
     Sch: Scheduler,
     Sch::Sender: crate::traits::SenderTo<crate::adaptors::OnScheduleReceiver<S, R>>,
     R: crate::traits::ReceiverOf<<S::Completions as crate::traits::CompletionSignatures>::Value>
-        + crate::traits::ReceiverOfError<<S::Completions as crate::traits::CompletionSignatures>::Error>
-        + crate::traits::ReceiverOfStopped,
+        + crate::traits::ReceiverOfError<
+            <S::Completions as crate::traits::CompletionSignatures>::Error,
+        > + crate::traits::ReceiverOfStopped,
 {
     type Operation = crate::adaptors::OnOperation<Sch, S, R>;
 

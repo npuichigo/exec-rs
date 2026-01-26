@@ -4,6 +4,7 @@
 //! background thread, similar to stdexec's `single_thread_context`.
 
 use super::run_loop::{RunLoop, RunLoopScheduler};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};
 
 /// A single-threaded execution context.
@@ -30,7 +31,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 /// // ctx is dropped here, stopping the thread
 /// ```
 pub struct SingleThreadContext {
-    run_loop: RunLoop,
+    run_loop: Arc<RunLoop>,
     thread: Option<JoinHandle<()>>,
     thread_id: ThreadId,
 }
@@ -43,38 +44,14 @@ impl SingleThreadContext {
 
     /// Create a new single-thread context with a custom thread name.
     pub fn with_name(name: &str) -> Self {
-        let run_loop = RunLoop::new();
-        let run_loop_for_thread = run_loop.get_scheduler();
+        let run_loop = Arc::new(RunLoop::new());
+        let run_loop_clone = run_loop.clone();
 
         let thread = thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
-                // Get the inner run loop and run it
-                // We need to run until finish() is called
-                loop {
-                    let work = {
-                        let mut state = run_loop_for_thread.inner.state.lock();
-
-                        // Wait while queue is empty AND not finished.
-                        // This is the proper condvar pattern - the predicate is checked
-                        // while holding the lock, and wait_while atomically releases
-                        // the lock and waits, then re-acquires before returning.
-                        run_loop_for_thread
-                            .inner
-                            .condvar
-                            .wait_while(&mut state, |s| s.queue.is_empty() && !s.finished);
-
-                        if state.finished && state.queue.is_empty() {
-                            return;
-                        }
-
-                        state.queue.pop_front()
-                    };
-
-                    if let Some(work) = work {
-                        work();
-                    }
-                }
+                // Run the run loop until finish() is called
+                run_loop_clone.run();
             })
             .expect("Failed to spawn thread");
 
@@ -129,10 +106,30 @@ mod tests {
     use crate::adaptors::{on, then};
     use crate::consumers::sync_wait;
     use crate::factories::just;
-    use crate::traits::Scheduler;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread::ThreadId;
+
+    #[test]
+    fn test_single_thread_context_push_only() {
+        // Simple test without sync_wait
+        let ctx = SingleThreadContext::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        // Push work directly via the run_loop
+        ctx.run_loop.push(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Give worker time to process
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        // Context drops here, which calls finish()
+        drop(ctx);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_single_thread_context_basic() {

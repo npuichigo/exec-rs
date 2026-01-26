@@ -4,8 +4,8 @@
 //! regardless of how it completes (value, error, or stopped).
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Sender, SenderTo,
 };
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
@@ -125,7 +125,7 @@ where
     V: 'static,
     E: 'static,
 {
-    fn set_value(mut self, value: V) {
+    fn set_value(self, value: V) {
         // Store the result
         unsafe {
             *self.state.main_result.get() = Some(MainResult::Value(value));
@@ -144,7 +144,7 @@ where
     V: 'static,
     E: 'static,
 {
-    fn set_error(mut self, error: E) {
+    fn set_error(self, error: E) {
         unsafe {
             *self.state.main_result.get() = Some(MainResult::Error(error));
         }
@@ -160,7 +160,7 @@ where
     V: 'static,
     E: 'static,
 {
-    fn set_stopped(mut self) {
+    fn set_stopped(self) {
         unsafe {
             *self.state.main_result.get() = Some(MainResult::Stopped);
         }

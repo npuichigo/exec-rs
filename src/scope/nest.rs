@@ -53,8 +53,7 @@ where
 
 impl<S, R, V, E> SenderTo<R> for Nest<S>
 where
-    S: Sender<Completions: CompletionSignatures<Value = V, Error = E>>
-        + SenderTo<NestReceiver<R>>,
+    S: Sender<Completions: CompletionSignatures<Value = V, Error = E>> + SenderTo<NestReceiver<R>>,
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     type Operation = NestOperation<S, R>;
@@ -77,6 +76,15 @@ where
 pub struct NestReceiver<R> {
     receiver: R,
     scope: Arc<AsyncScopeInner>,
+}
+
+impl<R: Clone> Clone for NestReceiver<R> {
+    fn clone(&self) -> Self {
+        Self {
+            receiver: self.receiver.clone(),
+            scope: self.scope.clone(),
+        }
+    }
 }
 
 /// Environment for nest receivers.
@@ -184,7 +192,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::consumers::sync_wait;
     use crate::factories::just;
     use crate::scope::AsyncScope;
@@ -209,11 +216,11 @@ mod tests {
     #[test]
     fn test_nest_multiple() {
         let scope = AsyncScope::new();
-        
+
         let r1 = sync_wait(scope.nest(just(1))).unwrap();
         let r2 = sync_wait(scope.nest(just(2))).unwrap();
         let r3 = sync_wait(scope.nest(just(3))).unwrap();
-        
+
         assert_eq!(r1, 1);
         assert_eq!(r2, 2);
         assert_eq!(r3, 3);

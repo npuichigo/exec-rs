@@ -3,7 +3,7 @@
 //! `when_any` runs multiple senders concurrently. The first one to complete
 //! determines the result, and the others are cancelled.
 
-use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource, StopToken};
+use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource};
 use crate::traits::{
     CompletionSignatures, Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError,
     ReceiverOfStopped, Sender, SenderTo,

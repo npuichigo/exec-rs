@@ -146,6 +146,7 @@ pub struct SyncWaitReceiver<V, E> {
 }
 
 /// Environment for sync_wait receiver.
+#[derive(Clone)]
 pub struct SyncWaitEnv {
     stop_token: InplaceStopToken,
 }

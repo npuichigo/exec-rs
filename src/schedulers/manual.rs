@@ -4,8 +4,8 @@
 //! advanced. This allows for deterministic testing of async behavior.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfStopped, Scheduler,
-    Sender, SenderTo,
+    CompletionSignatures, OperationState, ReceiverOf, ReceiverOfStopped, Scheduler, Sender,
+    SenderTo,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -199,8 +199,7 @@ impl<R: ReceiverOf<()> + ReceiverOfStopped + 'static> OperationState
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adaptors::{on, then};
-    use crate::factories::just;
+    use crate::traits::{Receiver, ReceiverOf, ReceiverOfStopped};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 

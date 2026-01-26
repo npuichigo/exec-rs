@@ -1,8 +1,8 @@
 //! On adaptor - run a sender on a specific scheduler.
 
 use crate::traits::{
-    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError,
-    ReceiverOfStopped, Scheduler, Sender, SenderTo,
+    CompletionSignatures, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+    Scheduler, Sender, SenderTo,
 };
 use std::marker::PhantomData;
 use std::pin::{pin, Pin};

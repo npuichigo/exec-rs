@@ -9,7 +9,8 @@ use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const NUM_THREADS: usize = 4;
+// Configure number of worker threads (set to 1 for single-threaded, or higher for multi-threaded)
+const NUM_THREADS: usize = 1;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -23,7 +24,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 async fn async_main() -> Result<(), Box<dyn Error>> {
     let addr = "127.0.0.1:12345";
     let listener = TcpListener::bind(addr).await?;
-    println!("Tokio echo server listening on {} ({} worker threads)", addr, NUM_THREADS);
+    println!(
+        "Tokio echo server listening on {} ({} worker threads)",
+        addr, NUM_THREADS
+    );
 
     loop {
         let (mut socket, _addr) = listener.accept().await?;

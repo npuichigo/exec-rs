@@ -4,9 +4,8 @@
 //! error, or stopped signal.
 
 use crate::traits::{
-    CompletionSignatures, JustCompletions, JustErrorCompletions, StoppedCompletion,
-    OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
-    Sender, SenderTo,
+    CompletionSignatures, JustCompletions, JustErrorCompletions, OperationState, ReceiverOf,
+    ReceiverOfError, ReceiverOfStopped, Sender, SenderTo, StoppedCompletion,
 };
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -405,7 +404,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{Environment, Receiver, VoidReceiver};
+    use crate::traits::VoidReceiver;
 
     #[test]
     fn test_just_creates_sender() {

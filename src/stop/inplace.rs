@@ -3,7 +3,7 @@
 //! This is the primary stop token implementation, matching C++'s
 //! `std::inplace_stop_source` and `std::inplace_stop_token`.
 
-use crate::stop::{StopSource, StopToken, StopCallbackHandle};
+use crate::stop::{StopCallbackHandle, StopSource, StopToken};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -34,7 +34,10 @@ impl std::fmt::Debug for InplaceStopSourceInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InplaceStopSourceInner")
             .field("state", &self.state)
-            .field("callbacks", &format!("<{} callbacks>", self.callbacks.lock().len()))
+            .field(
+                "callbacks",
+                &format!("<{} callbacks>", self.callbacks.lock().len()),
+            )
             .field("notifying_thread", &self.notifying_thread)
             .finish()
     }
@@ -317,5 +320,240 @@ mod tests {
         let _callback = token.register_callback(|| {
             panic!("Should never be called");
         });
+    }
+
+    /// Test that stop token cancellation works through sender/receiver chain.
+    #[test]
+    fn test_stop_token_cancellation_through_chain() {
+        use crate::traits::{
+            Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError, ReceiverOfStopped,
+            Sender, SenderTo, ValueCompletion,
+        };
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A sender that checks the stop token and cancels if requested
+        struct CheckStopSender<T> {
+            value: T,
+        }
+
+        impl<T: 'static> Sender for CheckStopSender<T> {
+            type Completions = ValueCompletion<T>;
+        }
+
+        struct CheckStopOperation<T, R> {
+            value: Option<T>,
+            receiver: Option<R>,
+        }
+
+        impl<T, R> OperationState for CheckStopOperation<T, R>
+        where
+            R: ReceiverOf<T> + ReceiverOfStopped,
+            R::Env: Environment,
+            <R::Env as Environment>::StopToken: super::StopToken,
+        {
+            fn start(self: Pin<&mut Self>) {
+                let this = unsafe { self.get_unchecked_mut() };
+                if let (Some(value), Some(receiver)) = (this.value.take(), this.receiver.take()) {
+                    // Check stop token from environment
+                    let stop_token = receiver.get_env().get_stop_token();
+                    if stop_token.stop_requested() {
+                        receiver.set_stopped();
+                    } else {
+                        receiver.set_value(value);
+                    }
+                }
+            }
+        }
+
+        impl<T: 'static, R> SenderTo<R> for CheckStopSender<T>
+        where
+            R: ReceiverOf<T> + ReceiverOfStopped,
+            R::Env: Environment,
+            <R::Env as Environment>::StopToken: super::StopToken,
+        {
+            type Operation = CheckStopOperation<T, R>;
+
+            fn connect(self, receiver: R) -> Self::Operation {
+                CheckStopOperation {
+                    value: Some(self.value),
+                    receiver: Some(receiver),
+                }
+            }
+        }
+
+        // Environment with our controllable stop token
+        struct TestEnv {
+            stop_token: InplaceStopToken,
+        }
+
+        impl Environment for TestEnv {
+            type StopToken = InplaceStopToken;
+
+            fn get_stop_token(&self) -> Self::StopToken {
+                self.stop_token.clone()
+            }
+        }
+
+        // Test receiver that tracks which completion was called
+        struct TestReceiver {
+            env: TestEnv,
+            value_called: Arc<AtomicBool>,
+            stopped_called: Arc<AtomicBool>,
+            value_received: Arc<std::sync::Mutex<Option<i32>>>,
+        }
+
+        impl Receiver for TestReceiver {
+            type Env = TestEnv;
+
+            fn get_env(&self) -> &Self::Env {
+                &self.env
+            }
+        }
+
+        impl ReceiverOf<i32> for TestReceiver {
+            fn set_value(self, value: i32) {
+                *self.value_received.lock().unwrap() = Some(value);
+                self.value_called.store(true, Ordering::SeqCst);
+            }
+        }
+
+        impl ReceiverOfError<()> for TestReceiver {
+            fn set_error(self, _: ()) {}
+        }
+
+        impl ReceiverOfStopped for TestReceiver {
+            fn set_stopped(self) {
+                self.stopped_called.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Test 1: Without stop requested, value should pass through
+        {
+            let source = InplaceStopSource::new();
+            let token = source.get_token();
+
+            let value_called = Arc::new(AtomicBool::new(false));
+            let stopped_called = Arc::new(AtomicBool::new(false));
+            let value_received = Arc::new(std::sync::Mutex::new(None));
+
+            let receiver = TestReceiver {
+                env: TestEnv { stop_token: token },
+                value_called: value_called.clone(),
+                stopped_called: stopped_called.clone(),
+                value_received: value_received.clone(),
+            };
+
+            let sender = CheckStopSender { value: 42 };
+            let mut op = sender.connect(receiver);
+            let pinned = unsafe { Pin::new_unchecked(&mut op) };
+            pinned.start();
+
+            assert!(
+                value_called.load(Ordering::SeqCst),
+                "set_value should be called"
+            );
+            assert!(
+                !stopped_called.load(Ordering::SeqCst),
+                "set_stopped should NOT be called"
+            );
+            assert_eq!(*value_received.lock().unwrap(), Some(42));
+        }
+
+        // Test 2: With stop requested, should complete with stopped
+        {
+            let source = InplaceStopSource::new();
+            let token = source.get_token();
+
+            // Request stop BEFORE starting
+            source.request_stop();
+
+            let value_called = Arc::new(AtomicBool::new(false));
+            let stopped_called = Arc::new(AtomicBool::new(false));
+            let value_received = Arc::new(std::sync::Mutex::new(None));
+
+            let receiver = TestReceiver {
+                env: TestEnv { stop_token: token },
+                value_called: value_called.clone(),
+                stopped_called: stopped_called.clone(),
+                value_received: value_received.clone(),
+            };
+
+            let sender = CheckStopSender { value: 42 };
+            let mut op = sender.connect(receiver);
+            let pinned = unsafe { Pin::new_unchecked(&mut op) };
+            pinned.start();
+
+            assert!(
+                !value_called.load(Ordering::SeqCst),
+                "set_value should NOT be called"
+            );
+            assert!(
+                stopped_called.load(Ordering::SeqCst),
+                "set_stopped should be called"
+            );
+            assert_eq!(*value_received.lock().unwrap(), None);
+        }
+    }
+
+    /// Test stop callback is invoked when stop is requested during operation
+    #[test]
+    fn test_stop_callback_during_operation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let source = InplaceStopSource::new();
+        let token = source.get_token();
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+
+        // Register callback before stop is requested
+        let _callback = token.register_callback(move || {
+            callback_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+
+        // Request stop - callback should fire
+        source.request_stop();
+
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+
+        // Requesting stop again should not fire callback again
+        source.request_stop();
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Test multiple callbacks are all invoked
+    #[test]
+    fn test_multiple_stop_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let source = InplaceStopSource::new();
+        let token = source.get_token();
+
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter3 = Arc::new(AtomicUsize::new(0));
+
+        let c1 = counter1.clone();
+        let c2 = counter2.clone();
+        let c3 = counter3.clone();
+
+        let _cb1 = token.register_callback(move || {
+            c1.fetch_add(1, Ordering::SeqCst);
+        });
+        let _cb2 = token.register_callback(move || {
+            c2.fetch_add(1, Ordering::SeqCst);
+        });
+        let _cb3 = token.register_callback(move || {
+            c3.fetch_add(1, Ordering::SeqCst);
+        });
+
+        source.request_stop();
+
+        assert_eq!(counter1.load(Ordering::SeqCst), 1);
+        assert_eq!(counter2.load(Ordering::SeqCst), 1);
+        assert_eq!(counter3.load(Ordering::SeqCst), 1);
     }
 }

@@ -25,10 +25,10 @@
 //! sync_wait(scope.when_empty()).unwrap();
 //! ```
 
-mod counting_scope;
 mod async_scope;
+mod counting_scope;
 mod nest;
 
-pub use counting_scope::*;
 pub use async_scope::*;
+pub use counting_scope::*;
 pub use nest::*;

@@ -1,6 +1,6 @@
 //! Never stop token - a token that never signals stop.
 
-use crate::stop::{StopToken, StopCallbackHandle, NoopCallbackHandle};
+use crate::stop::{StopCallbackHandle, StopToken};
 
 /// A stop token that never signals stop.
 ///

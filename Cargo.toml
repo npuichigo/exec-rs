@@ -12,11 +12,13 @@ categories = ["asynchronous", "concurrency"]
 pin-project-lite = "0.2"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
+wait_on_address = "0.1"
+mio = { version = "1", features = ["os-poll", "os-ext", "net"] }
 
 [dev-dependencies]
 static_assertions = "1.1"
 tokio = { version = "1", features = ["full"] }
-mio = { version = "1", features = ["os-poll", "net"] }
+ctrlc = "3.4"
 
 [features]
 default = []
@@ -29,14 +31,3 @@ path = "examples/tokio_echo.rs"
 [[example]]
 name = "exec_echo"
 path = "examples/exec_echo.rs"
-
-[[example]]
-name = "exec_echo_mio"
-path = "examples/exec_echo_mio.rs"
-
-[[example]]
-name = "exec_echo_mt"
-path = "examples/exec_echo_mt.rs"
-
-[lints.rust]
-unsafe_code = "warn"

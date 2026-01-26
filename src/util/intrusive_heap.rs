@@ -3,7 +3,6 @@
 //! This is a placeholder for future use. The current timed scheduler
 //! uses `std::collections::BinaryHeap` for simplicity.
 
-use std::cmp::Ordering;
 use std::ptr::NonNull;
 
 /// A node that can be stored in an intrusive heap.
@@ -365,11 +364,7 @@ mod tests {
     #[test]
     fn test_multiple_insert() {
         let mut heap: IntrusiveHeap<TestNode> = IntrusiveHeap::new();
-        let mut nodes = [
-            TestNode::new(3),
-            TestNode::new(1),
-            TestNode::new(2),
-        ];
+        let mut nodes = [TestNode::new(3), TestNode::new(1), TestNode::new(2)];
 
         unsafe {
             for node in &mut nodes {

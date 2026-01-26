@@ -5,8 +5,8 @@
 //! - [`sync_wait`]: Block until a sender completes
 //! - [`start_detached`]: Fire-and-forget execution
 
-mod sync_wait;
 mod start_detached;
+mod sync_wait;
 
-pub use sync_wait::*;
 pub use start_detached::*;
+pub use sync_wait::*;

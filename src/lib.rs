@@ -28,30 +28,32 @@
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
+#![allow(dead_code)]
+#![allow(ambiguous_glob_reexports)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-pub mod traits;
-pub mod stop;
-pub mod factories;
 pub mod adaptors;
+pub mod any;
 pub mod consumers;
+pub mod coro;
+pub mod factories;
+pub mod future;
+pub mod net;
 pub mod schedulers;
 pub mod scope;
-pub mod any;
-pub mod coro;
+pub mod sequence;
+pub mod stop;
+pub mod traits;
 pub mod util;
-pub mod future;
 
 /// Prelude module containing commonly used types and traits.
 pub mod prelude {
-    pub use crate::traits::*;
-    pub use crate::stop::{
-        StopToken, StopSource, StopCallback,
-        InplaceStopSource, InplaceStopToken,
-        NeverStopToken,
-    };
-    pub use crate::factories::*;
     pub use crate::adaptors::*;
     pub use crate::consumers::*;
+    pub use crate::factories::*;
     pub use crate::schedulers::InlineScheduler;
+    pub use crate::stop::{
+        InplaceStopSource, InplaceStopToken, NeverStopToken, StopCallback, StopSource, StopToken,
+    };
+    pub use crate::traits::*;
 }
