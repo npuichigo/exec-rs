@@ -9,6 +9,7 @@ use crate::traits::{
     SenderTo,
 };
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Start a sender and detach, not waiting for completion.
 ///
@@ -32,21 +33,76 @@ use std::pin::Pin;
 pub fn start_detached<S>(sender: S)
 where
     S: Sender + SenderTo<DetachedReceiver>,
+    S::Operation: Send + 'static,
 {
-    let receiver = DetachedReceiver;
-    let mut op = sender.connect(receiver);
+    // Box the operation and leak it - it will be cleaned up when completed
+    let receiver = DetachedReceiver::new();
+    let op = sender.connect(receiver.clone());
 
-    // SAFETY: We're starting the operation and it will run to completion.
-    // For inline execution, this happens synchronously.
-    // For async execution, the operation state would need to be boxed
-    // and kept alive until completion.
+    // Store the operation in a Box and leak it
+    // The operation will clean itself up via the guard when completed
+    let boxed_op = Box::new(DetachedOperation {
+        op,
+        _guard: receiver.guard.clone(),
+    });
+
+    // Leak the box - it will be dropped when the guard is dropped
+    let leaked = Box::into_raw(boxed_op);
+
+    // Start the operation
+    // SAFETY: The operation is heap-allocated and will remain valid
     unsafe {
-        Pin::new_unchecked(&mut op).start();
+        let pinned = Pin::new_unchecked(&mut (*leaked).op);
+        pinned.start();
     }
 
-    // For inline execution, the operation has completed by now.
-    // For async execution, we would need to leak/box the operation.
-    // This simple implementation only works correctly with inline execution.
+    // Store the pointer in the guard so it can be cleaned up
+    receiver.set_operation_ptr::<DetachedOperation<S::Operation>>(leaked as *mut ());
+}
+
+/// Holds the operation and cleanup guard together
+struct DetachedOperation<Op> {
+    op: Op,
+    _guard: Arc<DetachedGuard>,
+}
+
+/// Guard that cleans up the boxed operation when the receiver completes
+struct DetachedGuard {
+    /// Pointer to the DetachedOperation, set after creation
+    op_ptr: std::cell::UnsafeCell<Option<*mut ()>>,
+    /// Function to drop the operation
+    drop_fn: std::cell::UnsafeCell<Option<unsafe fn(*mut ())>>,
+}
+
+// SAFETY: The guard is only accessed from the completion callback
+unsafe impl Send for DetachedGuard {}
+unsafe impl Sync for DetachedGuard {}
+
+impl DetachedGuard {
+    fn new() -> Self {
+        Self {
+            op_ptr: std::cell::UnsafeCell::new(None),
+            drop_fn: std::cell::UnsafeCell::new(None),
+        }
+    }
+
+    fn cleanup(&self) {
+        // SAFETY: Called once when receiver completes
+        unsafe {
+            if let (Some(ptr), Some(drop_fn)) = (
+                (*self.op_ptr.get()).take(),
+                (*self.drop_fn.get()).take(),
+            ) {
+                drop_fn(ptr);
+            }
+        }
+    }
+}
+
+impl Drop for DetachedGuard {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }
 
 /// Environment for detached receivers.
@@ -61,9 +117,34 @@ impl Environment for DetachedEnv {
     }
 }
 
-/// Receiver that discards all completions.
-#[derive(Debug, Clone, Default)]
-pub struct DetachedReceiver;
+/// Receiver that discards all completions and keeps operation alive.
+#[derive(Clone)]
+pub struct DetachedReceiver {
+    guard: Arc<DetachedGuard>,
+}
+
+impl DetachedReceiver {
+    fn new() -> Self {
+        Self {
+            guard: Arc::new(DetachedGuard::new()),
+        }
+    }
+
+    fn set_operation_ptr<Op>(&self, ptr: *mut ()) {
+        // SAFETY: Called once during setup
+        unsafe {
+            *self.guard.op_ptr.get() = Some(ptr);
+            *self.guard.drop_fn.get() = Some(drop_boxed_operation::<Op>);
+        }
+    }
+}
+
+unsafe fn drop_boxed_operation<Op>(ptr: *mut ()) {
+    // SAFETY: ptr was created by Box::into_raw with the same type
+    unsafe {
+        let _ = Box::from_raw(ptr as *mut DetachedOperation<Op>);
+    }
+}
 
 impl Receiver for DetachedReceiver {
     type Env = DetachedEnv;
@@ -75,19 +156,19 @@ impl Receiver for DetachedReceiver {
 
 impl<V> ReceiverOf<V> for DetachedReceiver {
     fn set_value(self, _value: V) {
-        // Discard the value
+        // Discard the value - guard cleanup happens on drop
     }
 }
 
 impl<E> ReceiverOfError<E> for DetachedReceiver {
     fn set_error(self, _error: E) {
-        // Discard the error
+        // Discard the error - guard cleanup happens on drop
     }
 }
 
 impl ReceiverOfStopped for DetachedReceiver {
     fn set_stopped(self) {
-        // Discard the stopped signal
+        // Discard the stopped signal - guard cleanup happens on drop
     }
 }
 

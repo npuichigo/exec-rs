@@ -62,6 +62,11 @@ pub struct ContinuesOnReceiver<Sch, R, V, E> {
     _phantom: PhantomData<(V, E)>,
 }
 
+// SAFETY: ContinuesOnReceiver is Send if Sch and R are Send
+unsafe impl<Sch: Send, R: Send, V, E> Send for ContinuesOnReceiver<Sch, R, V, E> {}
+// SAFETY: ContinuesOnReceiver is Sync if Sch and R are Sync
+unsafe impl<Sch: Sync, R: Sync, V, E> Sync for ContinuesOnReceiver<Sch, R, V, E> {}
+
 impl<Sch, R: Receiver, V, E> Receiver for ContinuesOnReceiver<Sch, R, V, E> {
     type Env = R::Env;
 
@@ -116,6 +121,11 @@ pub struct ContinuesOnScheduleReceiver<R, V> {
     value: Option<V>,
     receiver: Option<R>,
 }
+
+// SAFETY: ContinuesOnScheduleReceiver is Send if both R and V are Send
+unsafe impl<R: Send, V: Send> Send for ContinuesOnScheduleReceiver<R, V> {}
+// SAFETY: ContinuesOnScheduleReceiver is Sync if both R and V are Sync
+unsafe impl<R: Sync, V: Sync> Sync for ContinuesOnScheduleReceiver<R, V> {}
 
 impl<R: Receiver, V> Receiver for ContinuesOnScheduleReceiver<R, V> {
     type Env = R::Env;

@@ -2,10 +2,16 @@
 //!
 //! This is the primary stop token implementation, matching C++'s
 //! `std::inplace_stop_source` and `std::inplace_stop_token`.
+//!
+//! Uses an intrusive doubly-linked list for callbacks. Each callback node
+//! is heap-allocated (to provide stable addresses for the intrusive list),
+//! but the closure is stored inline in the node, avoiding separate boxing
+//! of the callback function.
 
 use crate::stop::{StopCallbackHandle, StopSource, StopToken};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -13,33 +19,171 @@ use std::thread;
 const STOP_REQUESTED: u8 = 1;
 const LOCKED: u8 = 2;
 
+/// State flags for callbacks.
+const CB_NOT_REGISTERED: u8 = 0;
+const CB_REGISTERED: u8 = 1;
+const CB_EXECUTING: u8 = 2;
+const CB_DONE: u8 = 3;
+
+/// Type-erased callback node header for intrusive list.
+///
+/// This structure is embedded at the start of each concrete callback node type.
+/// Using `#[repr(C)]` ensures a predictable layout for safe casting.
+#[repr(C)]
+struct CallbackNodeHeader {
+    /// Next node in the list (null if tail).
+    next: AtomicPtr<CallbackNodeHeader>,
+    /// Previous node in the list (null if head).
+    prev: AtomicPtr<CallbackNodeHeader>,
+    /// Type-erased function to execute the callback.
+    /// Takes pointer to this node header, which can be cast back to concrete type.
+    execute: unsafe fn(*mut CallbackNodeHeader),
+    /// Callback state.
+    state: AtomicU8,
+    /// Whether callback execution completed (for synchronization).
+    executed: AtomicBool,
+}
+
+impl CallbackNodeHeader {
+    /// Create a new node header with the given execute function.
+    fn new(execute: unsafe fn(*mut CallbackNodeHeader)) -> Self {
+        Self {
+            next: AtomicPtr::new(std::ptr::null_mut()),
+            prev: AtomicPtr::new(std::ptr::null_mut()),
+            execute,
+            state: AtomicU8::new(CB_NOT_REGISTERED),
+            executed: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Concrete callback node that contains the closure inline.
+#[repr(C)]
+struct CallbackNode<F> {
+    /// Header must be first for safe casting.
+    header: CallbackNodeHeader,
+    /// The callback function stored inline.
+    callback: UnsafeCell<Option<F>>,
+}
+
 /// An inplace stop source.
 ///
 /// This is the primary stop source implementation. It supports:
 /// - Thread-safe stop requests
 /// - Callback registration and execution
 /// - Proper synchronization for concurrent access
+///
+/// Callbacks are stored in an intrusive doubly-linked list, which avoids
+/// the overhead of `Vec` reallocation when adding/removing callbacks.
 #[derive(Debug)]
 pub struct InplaceStopSource {
     inner: Arc<InplaceStopSourceInner>,
 }
 
 struct InplaceStopSourceInner {
+    /// State flags (STOP_REQUESTED | LOCKED).
     state: AtomicU8,
-    callbacks: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+    /// Head of callback list (protected by state LOCKED bit).
+    callbacks_head: UnsafeCell<*mut CallbackNodeHeader>,
+    /// Tail of callback list (protected by state LOCKED bit).
+    callbacks_tail: UnsafeCell<*mut CallbackNodeHeader>,
+    /// Thread that is currently notifying (for re-entrant callback deregistration).
     notifying_thread: Mutex<Option<thread::ThreadId>>,
 }
+
+// SAFETY: The inner state is accessed through atomic operations and mutex.
+unsafe impl Send for InplaceStopSourceInner {}
+unsafe impl Sync for InplaceStopSourceInner {}
 
 impl std::fmt::Debug for InplaceStopSourceInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InplaceStopSourceInner")
             .field("state", &self.state)
-            .field(
-                "callbacks",
-                &format!("<{} callbacks>", self.callbacks.lock().len()),
-            )
             .field("notifying_thread", &self.notifying_thread)
             .finish()
+    }
+}
+
+impl InplaceStopSourceInner {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(0),
+            callbacks_head: UnsafeCell::new(std::ptr::null_mut()),
+            callbacks_tail: UnsafeCell::new(std::ptr::null_mut()),
+            notifying_thread: Mutex::new(None),
+        }
+    }
+
+    /// Acquire the lock (spin on LOCKED bit).
+    fn lock(&self) -> u8 {
+        loop {
+            let old = self.state.load(Ordering::Relaxed);
+            if old & LOCKED != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            match self.state.compare_exchange_weak(
+                old,
+                old | LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return old,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Release the lock.
+    fn unlock(&self) {
+        self.state.fetch_and(!LOCKED, Ordering::Release);
+    }
+
+    /// Add a callback node to the list (must hold lock).
+    ///
+    /// # Safety
+    /// Caller must hold the lock and provide a valid node pointer.
+    unsafe fn add_callback(&self, node: *mut CallbackNodeHeader) {
+        // SAFETY: Caller guarantees we hold the lock.
+        unsafe {
+            let tail = *self.callbacks_tail.get();
+            (*node).prev.store(tail, Ordering::Relaxed);
+            (*node).next.store(std::ptr::null_mut(), Ordering::Relaxed);
+
+            if tail.is_null() {
+                // List was empty.
+                *self.callbacks_head.get() = node;
+            } else {
+                (*tail).next.store(node, Ordering::Relaxed);
+            }
+            *self.callbacks_tail.get() = node;
+        }
+    }
+
+    /// Remove a callback node from the list (must hold lock).
+    ///
+    /// # Safety
+    /// Caller must hold the lock and provide a valid node pointer that is in the list.
+    unsafe fn remove_callback(&self, node: *mut CallbackNodeHeader) {
+        // SAFETY: Caller guarantees we hold the lock and node is in the list.
+        unsafe {
+            let prev = (*node).prev.load(Ordering::Relaxed);
+            let next = (*node).next.load(Ordering::Relaxed);
+
+            if prev.is_null() {
+                // Node is head.
+                *self.callbacks_head.get() = next;
+            } else {
+                (*prev).next.store(next, Ordering::Relaxed);
+            }
+
+            if next.is_null() {
+                // Node is tail.
+                *self.callbacks_tail.get() = prev;
+            } else {
+                (*next).prev.store(prev, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -47,11 +191,7 @@ impl InplaceStopSource {
     /// Create a new stop source.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(InplaceStopSourceInner {
-                state: AtomicU8::new(0),
-                callbacks: Mutex::new(Vec::new()),
-                notifying_thread: Mutex::new(None),
-            }),
+            inner: Arc::new(InplaceStopSourceInner::new()),
         }
     }
 }
@@ -72,15 +212,15 @@ impl StopSource for InplaceStopSource {
     }
 
     fn request_stop(&self) -> bool {
-        // Try to acquire the lock and set stop_requested
+        // Try to acquire the lock and set stop_requested.
         let mut old_state = self.inner.state.load(Ordering::Relaxed);
         loop {
             if old_state & STOP_REQUESTED != 0 {
-                // Already stopped
+                // Already stopped.
                 return false;
             }
 
-            // Spin while locked
+            // Spin while locked.
             while old_state & LOCKED != 0 {
                 std::hint::spin_loop();
                 old_state = self.inner.state.load(Ordering::Relaxed);
@@ -97,16 +237,31 @@ impl StopSource for InplaceStopSource {
             }
         }
 
-        // Record the notifying thread
+        // Record the notifying thread.
         *self.inner.notifying_thread.lock() = Some(thread::current().id());
 
-        // Execute all callbacks
-        let callbacks = std::mem::take(&mut *self.inner.callbacks.lock());
-        for callback in callbacks {
-            callback();
+        // Execute all callbacks.
+        // SAFETY: We hold the lock.
+        unsafe {
+            let mut current = *self.inner.callbacks_head.get();
+            while !current.is_null() {
+                let next = (*current).next.load(Ordering::Relaxed);
+                // Mark as executing.
+                (*current).state.store(CB_EXECUTING, Ordering::Release);
+                // Execute the callback.
+                let execute = (*current).execute;
+                execute(current);
+                // Mark as done.
+                (*current).state.store(CB_DONE, Ordering::Release);
+                (*current).executed.store(true, Ordering::Release);
+                current = next;
+            }
+            // Clear the list.
+            *self.inner.callbacks_head.get() = std::ptr::null_mut();
+            *self.inner.callbacks_tail.get() = std::ptr::null_mut();
         }
 
-        // Release the lock but keep stop_requested
+        // Release the lock but keep stop_requested.
         self.inner.state.store(STOP_REQUESTED, Ordering::Release);
 
         true
@@ -140,7 +295,7 @@ impl Default for InplaceStopToken {
 }
 
 impl StopToken for InplaceStopToken {
-    type Callback<F: FnOnce() + Send> = InplaceStopCallback;
+    type Callback<F: FnOnce() + Send> = InplaceStopCallback<F>;
 
     fn stop_requested(&self) -> bool {
         self.inner
@@ -155,97 +310,206 @@ impl StopToken for InplaceStopToken {
 
     fn register_callback<F: FnOnce() + Send + 'static>(&self, callback: F) -> Self::Callback<F> {
         let Some(inner) = &self.inner else {
-            // No source, callback will never be invoked
+            // No source, callback will never be invoked.
             return InplaceStopCallback {
-                inner: None,
-                invoked: AtomicBool::new(false),
+                node: None,
+                source: None,
             };
         };
 
-        // Check if stop was already requested
+        // Check if stop was already requested (fast path).
         if inner.state.load(Ordering::Acquire) & STOP_REQUESTED != 0 {
-            // Execute callback immediately
+            // Execute callback immediately.
             callback();
             return InplaceStopCallback {
-                inner: None,
-                invoked: AtomicBool::new(true),
+                node: None,
+                source: Some(inner.clone()),
             };
         }
 
-        // Try to register the callback
-        let callback_id = {
-            let mut callbacks = inner.callbacks.lock();
+        // Create the boxed callback node.
+        let node = Box::new(CallbackNode {
+            header: CallbackNodeHeader::new(execute_callback::<F>),
+            callback: UnsafeCell::new(Some(callback)),
+        });
+        let node_ptr = Box::into_raw(node);
 
-            // Double-check stop wasn't requested while we were waiting for the lock
-            if inner.state.load(Ordering::Acquire) & STOP_REQUESTED != 0 {
-                drop(callbacks);
-                callback();
-                return InplaceStopCallback {
-                    inner: None,
-                    invoked: AtomicBool::new(true),
-                };
+        // Acquire lock to register.
+        let old_state = inner.lock();
+
+        // Double-check stop wasn't requested while we were waiting for the lock.
+        if old_state & STOP_REQUESTED != 0 {
+            inner.unlock();
+            // Take and execute the callback.
+            // SAFETY: We just created the node and it's not in the list.
+            let node = unsafe { Box::from_raw(node_ptr) };
+            let f = unsafe { (*node.callback.get()).take() };
+            if let Some(f) = f {
+                f();
             }
+            return InplaceStopCallback {
+                node: None,
+                source: Some(inner.clone()),
+            };
+        }
 
-            let id = callbacks.len();
-            callbacks.push(Box::new(callback));
-            id
-        };
+        // Register the callback.
+        // SAFETY: We hold the lock, and node_ptr is valid.
+        unsafe {
+            (*node_ptr).header.state.store(CB_REGISTERED, Ordering::Release);
+            inner.add_callback(node_ptr as *mut CallbackNodeHeader);
+        }
+
+        inner.unlock();
 
         InplaceStopCallback {
-            inner: Some(CallbackInner {
-                source: inner.clone(),
-                id: callback_id,
-            }),
-            invoked: AtomicBool::new(false),
+            node: Some(node_ptr),
+            source: Some(inner.clone()),
         }
     }
 }
 
-#[derive(Debug)]
-struct CallbackInner {
-    source: Arc<InplaceStopSourceInner>,
-    #[allow(dead_code)]
-    id: usize,
+/// Type-erased callback execution function.
+///
+/// # Safety
+/// `header` must point to a valid `CallbackNode<F>`.
+unsafe fn execute_callback<F: FnOnce() + Send>(header: *mut CallbackNodeHeader) {
+    // SAFETY: header is the first field of CallbackNode due to #[repr(C)].
+    let node = unsafe { &*(header as *const CallbackNode<F>) };
+
+    // Take and execute the callback.
+    // SAFETY: We're the only ones accessing the callback during execution.
+    let f = unsafe { (*node.callback.get()).take() };
+    if let Some(f) = f {
+        f();
+    }
 }
 
 /// Callback handle for inplace stop tokens.
-#[derive(Debug)]
-pub struct InplaceStopCallback {
-    inner: Option<CallbackInner>,
-    invoked: AtomicBool,
+///
+/// This struct owns a heap-allocated callback node that contains the closure
+/// inline. The node is part of an intrusive linked list in the stop source.
+///
+/// Dropping this handle deregisters the callback if it hasn't been invoked yet.
+pub struct InplaceStopCallback<F: FnOnce() + Send> {
+    /// Owned pointer to the callback node (None if already invoked or never registered).
+    node: Option<*mut CallbackNode<F>>,
+    /// Reference to the source (for deregistration).
+    source: Option<Arc<InplaceStopSourceInner>>,
 }
 
-impl StopCallbackHandle for InplaceStopCallback {
-    fn was_invoked(&self) -> bool {
-        self.invoked.load(Ordering::Acquire)
+// SAFETY: The callback is Send because F is Send and we synchronize access.
+unsafe impl<F: FnOnce() + Send> Send for InplaceStopCallback<F> {}
+
+impl<F: FnOnce() + Send> std::fmt::Debug for InplaceStopCallback<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InplaceStopCallback")
+            .field("has_node", &self.node.is_some())
+            .finish()
     }
 }
 
-impl Drop for InplaceStopCallback {
+impl<F: FnOnce() + Send> StopCallbackHandle for InplaceStopCallback<F> {
+    fn was_invoked(&self) -> bool {
+        match self.node {
+            None => {
+                // No node means either never registered or already invoked.
+                // If we have a source, it was invoked.
+                self.source.is_some()
+            }
+            Some(node_ptr) => {
+                // Check the node's executed flag.
+                // SAFETY: node_ptr is valid if node is Some.
+                unsafe { (*node_ptr).header.executed.load(Ordering::Acquire) }
+            }
+        }
+    }
+}
+
+impl<F: FnOnce() + Send> Drop for InplaceStopCallback<F> {
     fn drop(&mut self) {
-        // If the callback was already invoked or there's no inner, nothing to do
-        if self.inner.is_none() {
+        let Some(node_ptr) = self.node.take() else {
+            // No node to clean up.
+            return;
+        };
+
+        let Some(source) = &self.source else {
+            // No source, just free the node.
+            // SAFETY: We own the node.
+            unsafe {
+                let _ = Box::from_raw(node_ptr);
+            }
+            return;
+        };
+
+        // SAFETY: node_ptr is valid.
+        let state = unsafe { (*node_ptr).header.state.load(Ordering::Acquire) };
+
+        // If not registered or already done, just free the node.
+        if state == CB_NOT_REGISTERED || state == CB_DONE {
+            // SAFETY: We own the node and it's not in the list.
+            unsafe {
+                let _ = Box::from_raw(node_ptr);
+            }
             return;
         }
 
-        let inner = self.inner.as_ref().unwrap();
-
-        // If stop was requested and we're on the notifying thread, the callback
-        // might be executing right now
-        if inner.source.state.load(Ordering::Acquire) & STOP_REQUESTED != 0 {
-            let notifying_thread = inner.source.notifying_thread.lock();
+        // If stop was requested, we might be in the middle of execution.
+        if source.state.load(Ordering::Acquire) & STOP_REQUESTED != 0 {
+            // Check if we're on the notifying thread (re-entrant deregistration).
+            let notifying_thread = source.notifying_thread.lock();
             if *notifying_thread == Some(thread::current().id()) {
-                // We're on the notifying thread, the callback might be in progress
-                // Just mark it as invoked to prevent double-execution
-                self.invoked.store(true, Ordering::Release);
+                // We're being called from within callback execution.
+                // The node is being iterated over, so we can't free it here.
+                // Mark it for cleanup but don't free yet.
+                // Actually, after iteration the list is cleared, so the node
+                // will be orphaned. We still own it and should free it.
+                drop(notifying_thread);
+                // SAFETY: We own the node.
+                unsafe {
+                    let _ = Box::from_raw(node_ptr);
+                }
                 return;
+            }
+            drop(notifying_thread);
+
+            // Wait for execution to complete if it's in progress.
+            // SAFETY: node_ptr is valid.
+            unsafe {
+                while (*node_ptr).header.state.load(Ordering::Acquire) == CB_EXECUTING {
+                    std::hint::spin_loop();
+                }
+            }
+
+            // Now the node is done, free it.
+            // SAFETY: We own the node and execution is complete.
+            unsafe {
+                let _ = Box::from_raw(node_ptr);
+            }
+            return;
+        }
+
+        // Acquire lock to deregister.
+        source.lock();
+
+        // Re-check state under lock.
+        // SAFETY: node_ptr is valid.
+        let state = unsafe { (*node_ptr).header.state.load(Ordering::Acquire) };
+        if state == CB_REGISTERED {
+            // SAFETY: We hold the lock and the callback is in the list.
+            unsafe {
+                source.remove_callback(node_ptr as *mut CallbackNodeHeader);
+                (*node_ptr).header.state.store(CB_NOT_REGISTERED, Ordering::Release);
             }
         }
 
-        // Otherwise, we need to wait until the callback finishes or remove it
-        // For simplicity, we just mark it as invoked
-        // A production implementation would properly remove from the callback list
-        self.invoked.store(true, Ordering::Release);
+        source.unlock();
+
+        // Free the node.
+        // SAFETY: We own the node and it's no longer in the list.
+        unsafe {
+            let _ = Box::from_raw(node_ptr);
+        }
     }
 }
 
@@ -320,6 +584,29 @@ mod tests {
         let _callback = token.register_callback(|| {
             panic!("Should never be called");
         });
+    }
+
+    #[test]
+    fn test_callback_deregistration() {
+        use std::sync::atomic::AtomicUsize;
+
+        let source = InplaceStopSource::new();
+        let token = source.get_token();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        // Register and then drop the callback before stop is requested.
+        {
+            let _callback = token.register_callback(move || {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        // Now request stop - callback should NOT be invoked.
+        source.request_stop();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
     /// Test that stop token cancellation works through sender/receiver chain.
@@ -555,5 +842,63 @@ mod tests {
         assert_eq!(counter1.load(Ordering::SeqCst), 1);
         assert_eq!(counter2.load(Ordering::SeqCst), 1);
         assert_eq!(counter3.load(Ordering::SeqCst), 1);
+    }
+
+    /// Test partial deregistration - some callbacks dropped before stop
+    #[test]
+    fn test_partial_deregistration() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let source = InplaceStopSource::new();
+        let token = source.get_token();
+
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter3 = Arc::new(AtomicUsize::new(0));
+
+        let c1 = counter1.clone();
+        let c2 = counter2.clone();
+        let c3 = counter3.clone();
+
+        let _cb1 = token.register_callback(move || {
+            c1.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // This one will be dropped before stop
+        {
+            let _cb2 = token.register_callback(move || {
+                c2.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        let _cb3 = token.register_callback(move || {
+            c3.fetch_add(1, Ordering::SeqCst);
+        });
+
+        source.request_stop();
+
+        assert_eq!(counter1.load(Ordering::SeqCst), 1);
+        assert_eq!(counter2.load(Ordering::SeqCst), 0); // Was deregistered
+        assert_eq!(counter3.load(Ordering::SeqCst), 1);
+    }
+
+    /// Test detached token
+    #[test]
+    fn test_detached_token() {
+        let token = InplaceStopToken::new_detached();
+
+        assert!(!token.stop_requested());
+        assert!(!token.stop_possible());
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        // Callback on detached token should not be invoked
+        let callback = token.register_callback(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert!(!callback.was_invoked());
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }

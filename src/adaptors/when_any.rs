@@ -2,6 +2,9 @@
 //!
 //! `when_any` runs multiple senders concurrently. The first one to complete
 //! determines the result, and the others are cancelled.
+//!
+//! This implementation is allocation-free, matching C++ stdexec's design.
+//! The state lives inline in the operation and receivers hold raw pointers.
 
 use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource};
 use crate::traits::{
@@ -10,9 +13,9 @@ use crate::traits::{
 };
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Race two senders, the first to complete wins.
 ///
@@ -83,30 +86,26 @@ where
     type Operation = WhenAnyOperation<S1, S2, R, V, E>;
 
     fn connect(self, receiver: R) -> Self::Operation {
-        let state = Arc::new(WhenAnyState::new(receiver));
-
-        let receiver1 = WhenAnyReceiver1 {
-            state: state.clone(),
-        };
-        let receiver2 = WhenAnyReceiver2 {
-            state: state.clone(),
-        };
-
         WhenAnyOperation {
-            state,
-            op1: UnsafeCell::new(Some(self.sender1.connect(receiver1))),
-            op2: UnsafeCell::new(Some(self.sender2.connect(receiver2))),
+            // Store senders - they will be connected in start()
+            sender1: Some(self.sender1),
+            sender2: Some(self.sender2),
+            // State is inline - no heap allocation!
+            state: WhenAnyState::new(receiver),
+            // Operations are created in start() after we're pinned
+            op1: UnsafeCell::new(MaybeUninit::uninit()),
+            op2: UnsafeCell::new(MaybeUninit::uninit()),
             started: false,
         }
     }
 }
 
-/// Shared state for when_any operation.
+/// Inline state for when_any operation - no heap allocation.
 struct WhenAnyState<V, E, R> {
     /// Has a sender already completed?
     completed: AtomicBool,
     /// Counter of remaining senders that need to arrive (for cleanup).
-    count: std::sync::atomic::AtomicU8,
+    count: AtomicU8,
     /// Stop source for cancelling the other sender.
     stop_source: InplaceStopSource,
     /// The downstream receiver.
@@ -126,7 +125,7 @@ where
     fn new(receiver: R) -> Self {
         Self {
             completed: AtomicBool::new(false),
-            count: std::sync::atomic::AtomicU8::new(2),
+            count: AtomicU8::new(2),
             stop_source: InplaceStopSource::new(),
             receiver: UnsafeCell::new(Some(receiver)),
             _phantom: PhantomData,
@@ -169,9 +168,18 @@ impl Environment for WhenAnyEnv {
 }
 
 /// Receiver for the first sender in when_any.
+///
+/// Holds a raw pointer to the inline state. This is safe because:
+/// 1. The WhenAnyOperation is pinned when start() is called
+/// 2. The receiver is consumed when completion signals are delivered
+/// 3. The operation outlives all child operations
 pub struct WhenAnyReceiver1<V, E, R> {
-    state: Arc<WhenAnyState<V, E, R>>,
+    state: *const WhenAnyState<V, E, R>,
 }
+
+// SAFETY: The pointer points to a WhenAnyState that is Send+Sync
+unsafe impl<V: Send, E: Send, R: Send> Send for WhenAnyReceiver1<V, E, R> {}
+unsafe impl<V: Send, E: Send, R: Send> Sync for WhenAnyReceiver1<V, E, R> {}
 
 impl<V, E, R> Receiver for WhenAnyReceiver1<V, E, R>
 where
@@ -194,14 +202,16 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_value(self, value: V) {
-        if self.state.try_complete() {
+        // SAFETY: Pointer is valid because operation is pinned
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
             // We won the race!
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_value(value);
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
@@ -210,13 +220,14 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_error(self, error: E) {
-        if self.state.try_complete() {
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_error(error);
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
@@ -225,20 +236,25 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_stopped(self) {
-        if self.state.try_complete() {
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_stopped();
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
 /// Receiver for the second sender in when_any.
 pub struct WhenAnyReceiver2<V, E, R> {
-    state: Arc<WhenAnyState<V, E, R>>,
+    state: *const WhenAnyState<V, E, R>,
 }
+
+// SAFETY: The pointer points to a WhenAnyState that is Send+Sync
+unsafe impl<V: Send, E: Send, R: Send> Send for WhenAnyReceiver2<V, E, R> {}
+unsafe impl<V: Send, E: Send, R: Send> Sync for WhenAnyReceiver2<V, E, R> {}
 
 impl<V, E, R> Receiver for WhenAnyReceiver2<V, E, R>
 where
@@ -261,13 +277,14 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_value(self, value: V) {
-        if self.state.try_complete() {
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_value(value);
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
@@ -276,13 +293,14 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_error(self, error: E) {
-        if self.state.try_complete() {
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_error(error);
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
@@ -291,35 +309,43 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_stopped(self) {
-        if self.state.try_complete() {
-            self.state.request_stop();
-            if let Some(receiver) = self.state.take_receiver() {
+        let state = unsafe { &*self.state };
+        if state.try_complete() {
+            state.request_stop();
+            if let Some(receiver) = state.take_receiver() {
                 receiver.set_stopped();
             }
         }
-        self.state.arrive();
+        state.arrive();
     }
 }
 
-/// Operation state for WhenAny.
+/// Operation state for WhenAny - allocation-free.
+///
+/// The state is stored inline and receivers hold raw pointers to it.
+/// This is safe because the operation is pinned when start() is called.
 pub struct WhenAnyOperation<S1, S2, R, V, E>
 where
     S1: SenderTo<WhenAnyReceiver1<V, E, R>>,
     S2: SenderTo<WhenAnyReceiver2<V, E, R>>,
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
-    #[allow(dead_code)]
-    state: Arc<WhenAnyState<V, E, R>>,
-    op1: UnsafeCell<Option<S1::Operation>>,
-    op2: UnsafeCell<Option<S2::Operation>>,
+    /// Senders stored until start() - then moved out
+    sender1: Option<S1>,
+    sender2: Option<S2>,
+    /// Inline state - no heap allocation
+    state: WhenAnyState<V, E, R>,
+    /// Child operations - initialized in start() after we're pinned
+    op1: UnsafeCell<MaybeUninit<S1::Operation>>,
+    op2: UnsafeCell<MaybeUninit<S2::Operation>>,
     started: bool,
 }
 
 // SAFETY: The operations are only accessed from the thread that calls start().
 unsafe impl<S1, S2, R, V, E> Send for WhenAnyOperation<S1, S2, R, V, E>
 where
-    S1: SenderTo<WhenAnyReceiver1<V, E, R>>,
-    S2: SenderTo<WhenAnyReceiver2<V, E, R>>,
+    S1: SenderTo<WhenAnyReceiver1<V, E, R>> + Send,
+    S2: SenderTo<WhenAnyReceiver2<V, E, R>> + Send,
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped + Send,
     V: Send,
     E: Send,
@@ -335,6 +361,7 @@ where
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn start(self: Pin<&mut Self>) {
+        // SAFETY: We don't move self, only access fields
         let this = unsafe { self.get_unchecked_mut() };
 
         if this.started {
@@ -342,13 +369,49 @@ where
         }
         this.started = true;
 
+        // Take the senders - they're consumed here
+        let sender1 = this.sender1.take().expect("sender1 already taken");
+        let sender2 = this.sender2.take().expect("sender2 already taken");
+
+        // Create receivers with raw pointers to our inline state.
+        // SAFETY: The operation is now pinned, so the state pointer is stable.
+        let state_ptr = &this.state as *const WhenAnyState<V, E, R>;
+
+        let receiver1 = WhenAnyReceiver1 { state: state_ptr };
+        let receiver2 = WhenAnyReceiver2 { state: state_ptr };
+
+        // Connect senders to receivers and store operations
+        let op1 = sender1.connect(receiver1);
+        let op2 = sender2.connect(receiver2);
+
+        unsafe {
+            (*this.op1.get()).write(op1);
+            (*this.op2.get()).write(op2);
+        }
+
         // Start both operations - the first to complete wins
         unsafe {
-            if let Some(op1) = (*this.op1.get()).as_mut() {
-                Pin::new_unchecked(op1).start();
-            }
-            if let Some(op2) = (*this.op2.get()).as_mut() {
-                Pin::new_unchecked(op2).start();
+            let op1_ptr = (*this.op1.get()).as_mut_ptr();
+            let op2_ptr = (*this.op2.get()).as_mut_ptr();
+
+            Pin::new_unchecked(&mut *op1_ptr).start();
+            Pin::new_unchecked(&mut *op2_ptr).start();
+        }
+    }
+}
+
+impl<S1, S2, R, V, E> Drop for WhenAnyOperation<S1, S2, R, V, E>
+where
+    S1: SenderTo<WhenAnyReceiver1<V, E, R>>,
+    S2: SenderTo<WhenAnyReceiver2<V, E, R>>,
+    R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped,
+{
+    fn drop(&mut self) {
+        // Only drop the operations if they were initialized (i.e., if start() was called)
+        if self.started {
+            unsafe {
+                std::ptr::drop_in_place((*self.op1.get()).as_mut_ptr());
+                std::ptr::drop_in_place((*self.op2.get()).as_mut_ptr());
             }
         }
     }
@@ -358,7 +421,12 @@ where
 mod tests {
     use super::*;
     use crate::consumers::sync_wait;
-    use crate::factories::just;
+    use crate::factories::{just, just_error};
+    use crate::traits::Sender;
+
+    // ========================================================================
+    // test_when_any.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_when_any_basic() {
@@ -384,5 +452,38 @@ mod tests {
     fn test_when_any_unit() {
         let result = sync_wait(when_any(just(()), just(()))).unwrap();
         assert_eq!(result, ());
+    }
+
+    #[test]
+    fn test_when_any_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = when_any(just(1), just(2));
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_when_any_both_errors() {
+        // Both senders have same value and error types
+        let result = sync_wait(when_any(
+            just_error::<_>("error1"),
+            just_error::<_>("error2"),
+        ));
+        // First error wins
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_when_any_move_only_value() {
+        let b1 = Box::new(1);
+        let b2 = Box::new(2);
+        let result = sync_wait(when_any(just(b1), just(b2))).unwrap();
+        // First one wins
+        assert_eq!(*result, 1);
+    }
+
+    #[test]
+    fn test_when_any_same_values() {
+        let result = sync_wait(when_any(just(42), just(42))).unwrap();
+        assert_eq!(result, 42);
     }
 }

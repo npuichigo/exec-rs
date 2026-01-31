@@ -62,7 +62,8 @@ impl CountingScope {
     /// `when_empty` completes.
     pub fn spawn<S>(&self, sender: S)
     where
-        S: Sender + SenderTo<ScopedReceiver>,
+        S: Sender + SenderTo<ScopedReceiver> + 'static,
+        S::Operation: Send + 'static,
     {
         // Increment active count
         self.inner.active.fetch_add(1, Ordering::AcqRel);

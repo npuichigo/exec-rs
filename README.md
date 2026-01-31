@@ -1,17 +1,122 @@
-# exec-rs Implementation Status Report
+# exec-rs
 
-A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec reference implementation.
+A Rust implementation of C++ std::execution (P2300) based on the [NVIDIA/stdexec](https://github.com/NVIDIA/stdexec) reference implementation.
 
-## Summary
+## Overview
 
-- **Source Files**: 70+ Rust files
-- **Unit Tests**: 195 passing
-- **Doc Tests**: 44 passing (26 ignored)
-- **Examples**: 2 echo server implementations + benchmark
+exec-rs provides lazy, composable asynchronous programming primitives with zero-cost abstractions using the **sender/receiver** model from C++ P2300.
 
----
+```rust
+use exec_rs::prelude::*;
 
-## Phase Completion Status
+// Compose async operations
+let result = sync_wait(
+    just(21)
+        .then(|x| x * 2)
+        .let_value(|x| just(format!("Result: {}", x)))
+).unwrap();
+
+assert_eq!(result, "Result: 42");
+```
+
+## Features
+
+- **Zero-cost abstractions**: No heap allocation for basic operations
+- **Type-safe composition**: Compile-time checked sender pipelines
+- **Structured concurrency**: Scopes ensure proper lifetime management
+- **Cancellation support**: Stop tokens propagate through pipelines
+- **Multiple schedulers**: Thread pools, timed schedulers, inline execution
+- **Async I/O**: mio-based networking with sender operations (P2762)
+
+## Quick Start
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+exec-rs = "0.1"
+```
+
+### Basic Example
+
+```rust
+use exec_rs::consumers::sync_wait;
+use exec_rs::factories::just;
+use exec_rs::traits::SenderExt;
+
+fn main() {
+    // Simple value transformation
+    let result = sync_wait(
+        just(1)
+            .then(|x| x + 1)
+            .then(|x| x * 2)
+    ).unwrap();
+
+    println!("Result: {}", result); // Result: 4
+}
+```
+
+### Thread Pool Example
+
+```rust
+use exec_rs::adaptors::on;
+use exec_rs::consumers::sync_wait;
+use exec_rs::factories::just;
+use exec_rs::schedulers::StaticThreadPool;
+use exec_rs::traits::SenderExt;
+
+fn main() {
+    let pool = StaticThreadPool::new(4);
+    let scheduler = pool.get_scheduler();
+
+    let result = sync_wait(on(scheduler, just(42).then(|x| x * 2))).unwrap();
+    println!("Result: {}", result); // Result: 84
+}
+```
+
+## Project Statistics
+
+- **Source Files**: 86 Rust files
+- **Unit Tests**: 272 passing
+- **Examples**: 14 examples across basics, algorithms, networking, and timed scheduling
+
+## Examples
+
+Run examples with `cargo run --example <name>`:
+
+### Basics
+| Example | Description |
+|---------|-------------|
+| `hello_world` | Basic `just`, `then`, `schedule`, `sync_wait` |
+| `let_value` | Dependent sender composition |
+| `when_all` | Concurrent composition |
+| `error_handling` | Error types, `just_error`, `materialize` |
+| `thread_pool` | `StaticThreadPool`, `on()`, parallel work |
+| `split` | Multi-shot sender with `split` |
+| `counting_scope` | Structured concurrency |
+
+### Algorithms
+| Example | Description |
+|---------|-------------|
+| `parallel_for` | Bulk iteration patterns |
+| `retry` | Retry patterns with senders |
+| `async_inclusive_scan` | Parallel prefix sum algorithm |
+
+### Networking
+| Example | Description |
+|---------|-------------|
+| `tokio_echo` | Tokio-based echo server (baseline) |
+| `exec_echo` | exec-rs sender-based echo server |
+
+### Timed Scheduler
+| Example | Description |
+|---------|-------------|
+| `timed_scheduler` | Synchronous timed operations |
+| `timed_scheduler_async` | Async timed operations |
+
+## Implementation Status
+
+### Core Components
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -28,287 +133,89 @@ A Rust implementation of C++ std::execution (P2300) based on the NVIDIA/stdexec 
 | 11 | Type-Erased Senders | ✅ Complete |
 | 12 | Advanced Schedulers | ✅ Complete |
 | 13 | Coroutine Integration | ✅ Complete |
-| 14 | Utilities | ⚠️ Partial |
+| 14 | Utilities | ✅ Complete |
 | 15 | Future Bridge | ✅ Complete |
-| 16 | **Networking (P2762)** | ✅ Complete |
+| 16 | Networking (P2762) | ✅ Complete |
 
----
+### Sender Factories (`src/factories/`)
 
-## Detailed Implementation Status
+- `just(value)` - Immediate value completion
+- `just_error(error)` - Immediate error completion
+- `just_stopped()` - Immediate stopped completion
+- `just_from(fn)` - Lazy value from function
+- `schedule(scheduler)` - Schedule on execution context
+- `transfer_just(scheduler, value)` - Transfer value to scheduler
+- `read_env(query)` - Read from environment
 
-### Phase 1: Core Traits (`src/traits/`)
+### Adaptors (`src/adaptors/`)
 
-| Component | File | Status |
-|-----------|------|--------|
-| `Sender` trait | `sender.rs` | ✅ |
-| `SenderTo<R>` trait | `sender.rs` | ✅ |
-| `SenderExt` extension | `sender.rs` | ✅ |
-| `Receiver` trait | `receiver.rs` | ✅ |
-| `ReceiverOf<V>` trait | `receiver.rs` | ✅ |
-| `ReceiverOfError<E>` trait | `receiver.rs` | ✅ |
-| `ReceiverOfStopped` trait | `receiver.rs` | ✅ |
-| `OperationState` trait | `operation.rs` | ✅ |
-| `CompletionSignatures` trait | `completion.rs` | ✅ |
-| `Scheduler` trait | `scheduler.rs` | ✅ |
-| `Environment` trait | `env.rs` | ✅ |
-| `GetScheduler` query | `env.rs` | ✅ |
-| `GetStopToken` query | `env.rs` | ✅ |
+- `then(fn)` - Transform value
+- `upon_error(fn)` - Transform error
+- `upon_stopped(fn)` - Transform stopped
+- `let_value(fn)` - Chain dependent sender
+- `let_error(fn)` - Handle error with sender
+- `let_stopped(fn)` - Handle stopped with sender
+- `on(scheduler, sender)` - Run on scheduler
+- `starts_on(scheduler, sender)` - Start on scheduler
+- `continues_on(scheduler)` - Continue on scheduler
+- `when_all(s1, s2)` - Wait for both senders
+- `when_any(s1, s2)` - Race two senders
+- `split(sender)` - Multi-shot sender
+- `ensure_started(sender)` - Eager execution
+- `bulk(shape, fn)` - Parallel iteration
+- `materialize()` - Completion to variant
+- `repeat_n(n)` - Repeat N times
+- `repeat_effect_until(pred)` - Repeat with condition
+- `finally(cleanup)` - Guaranteed cleanup
+- `fork_join2/3/4(fns...)` - Fork and join
 
-### Phase 1: Stop Tokens (`src/stop/`)
+### Schedulers (`src/schedulers/`)
 
-| Component | File | Status |
-|-----------|------|--------|
-| `StopToken` trait | `token.rs` | ✅ |
-| `StopSource` trait | `source.rs` | ✅ |
-| `InplaceStopSource` | `inplace.rs` | ✅ |
-| `InplaceStopToken` | `inplace.rs` | ✅ |
-| `StopCallback` | `callback.rs` | ✅ |
-| `NeverStopToken` | `never.rs` | ✅ |
+- `InlineScheduler` - Synchronous inline execution
+- `RunLoop` - Single-threaded event loop
+- `SingleThreadContext` - Dedicated thread executor
+- `StaticThreadPool` - Multi-threaded work-stealing pool
+- `TrampolineScheduler` - Recursion-safe scheduler
+- `ManualScheduler` - Manual advance for testing
+- `TimedThreadScheduler` - Timer-based scheduling
 
-### Phase 2: Sender Factories (`src/factories/`)
+### Structured Concurrency (`src/scope/`)
 
-| Component | File | Status |
-|-----------|------|--------|
-| `just(value)` | `just.rs` | ✅ |
-| `just_error(error)` | `just.rs` | ✅ |
-| `just_stopped()` | `just.rs` | ✅ |
-| `just_from(fn)` | `just.rs` | ✅ |
-| `just_error_from(fn)` | `just.rs` | ✅ |
-| `just_stopped_from(fn)` | `just.rs` | ✅ |
-| `schedule(scheduler)` | `schedule.rs` | ✅ |
-| `transfer_just(scheduler, value)` | `schedule.rs` | ✅ |
-| `read_env(query)` | `read_env.rs` | ✅ |
+- `AsyncScope` - Tracks nested sender lifetimes
+- `CountingScope` - Reference-counting scope
+- `nest(sender)` - Track sender in scope
 
-### Phase 3: Consumers (`src/consumers/`)
+### Networking (`src/net/`)
 
-| Component | File | Status |
-|-----------|------|--------|
-| `sync_wait(sender)` | `sync_wait.rs` | ✅ |
-| `start_detached(sender)` | `start_detached.rs` | ✅ |
+Following the P2762 async I/O proposal:
 
-### Phase 4-5: Adaptors (`src/adaptors/`)
+- `IoContext` - Event loop with mio
+- `TcpListener` / `TcpStream` - TCP sockets
+- `async_accept()` - Accept connections
+- `async_receive()` / `async_send()` - I/O operations
 
-| Component | File | Status |
-|-----------|------|--------|
-| `then(sender, fn)` | `then.rs` | ✅ |
-| `upon_error(sender, fn)` | `upon_error.rs` | ✅ |
-| `upon_stopped(sender, fn)` | `upon_stopped.rs` | ✅ |
-| `let_value(sender, fn)` | `let_value.rs` | ✅ |
-| `let_error(sender, fn)` | `let_error.rs` | ✅ |
-| `let_stopped(sender, fn)` | `let_stopped.rs` | ✅ |
+## Benchmark Results
 
-### Phase 6: Execution Context Switching
-
-| Component | File | Status |
-|-----------|------|--------|
-| `on(scheduler, sender)` | `on.rs` | ✅ |
-| `starts_on(scheduler, sender)` | `starts_on.rs` | ✅ |
-| `continues_on(scheduler)` | `continues_on.rs` | ✅ |
-| `reschedule()` | `reschedule.rs` | ✅ |
-
-### Phase 7: Concurrent Composition
-
-| Component | File | Status |
-|-----------|------|--------|
-| `when_all(s1, s2, ...)` | `when_all.rs` | ✅ |
-| `when_any(s1, s2, ...)` | `when_any.rs` | ✅ |
-
-### Phase 8: Additional Adaptors
-
-| Component | File | Status |
-|-----------|------|--------|
-| `split(sender)` | `split.rs` | ✅ |
-| `ensure_started(sender)` | `ensure_started.rs` | ✅ |
-| `bulk(sender, shape, fn)` | `bulk.rs` | ✅ |
-| `materialize()` | `materialize.rs` | ✅ |
-| `into_tuple()` | `into_tuple.rs` | ✅ |
-| `stopped_as_optional()` | `stopped_as_optional.rs` | ✅ |
-| `stopped_as_error(err)` | `stopped_as_error.rs` | ✅ |
-| `repeat_effect(sender)` | `repeat.rs` | ✅ |
-| `repeat_n(sender, n)` | `repeat.rs` | ✅ |
-| `repeat_effect_until(sender, pred)` | `repeat.rs` | ✅ |
-| `finally(sender, cleanup)` | `finally.rs` | ✅ |
-| `unless_stopped()` | `unless_stopped.rs` | ✅ |
-| `into_variant()` | `into_variant.rs` | ✅ |
-| `write_env(sender, env)` | `write_env.rs` | ✅ |
-| `fork_join2/3/4(sender, fns...)` | `fork_join.rs` | ✅ |
-
-### Phase 9: Structured Concurrency (`src/scope/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `AsyncScope` | `async_scope.rs` | ✅ |
-| `CountingScope` | `counting_scope.rs` | ✅ |
-| `nest(sender)` | `nest.rs` | ✅ |
-
-### Phase 11: Type-Erased Senders (`src/any/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `AnySender<V, E>` | `any_sender.rs` | ✅ |
-| `AnyScheduler` | `any_scheduler.rs` | ✅ |
-| `VariantSender2<S1, S2>` | `variant_sender.rs` | ✅ |
-| `VariantSender3<S1, S2, S3>` | `variant_sender.rs` | ✅ |
-| `VariantSender4<S1, S2, S3, S4>` | `variant_sender.rs` | ✅ |
-| `EitherSender` (alias) | `variant_sender.rs` | ✅ |
-
-### Phase 12: Schedulers (`src/schedulers/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `InlineScheduler` | `inline.rs` | ✅ |
-| `RunLoop` | `run_loop.rs` | ✅ |
-| `SingleThreadContext` | `single_thread.rs` | ✅ |
-| `StaticThreadPool` | `thread_pool.rs` | ✅ |
-| `TrampolineScheduler` | `trampoline.rs` | ✅ |
-| `ManualScheduler` | `manual.rs` | ✅ |
-| `TimedScheduler` trait | `timed.rs` | ✅ |
-| `TimedThreadContext` | `timed_thread.rs` | ✅ |
-| `TimedThreadScheduler` | `timed_thread.rs` | ✅ |
-
-### Phase 14: Utilities (`src/util/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `ScopeGuard` | `scope_guard.rs` | ✅ |
-| `IntrusiveHeap` | `intrusive_heap.rs` | ✅ |
-| `AtomicIntrusiveQueue` | `intrusive_queue.rs` | ✅ |
-
-### Phase 13: Coroutine Integration (`src/coro/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `Task<T, E>` | `task.rs` | ✅ |
-| `TaskError<E>` | `task.rs` | ✅ |
-| `TaskReceiver<T, E>` | `task.rs` | ✅ |
-| `SpawnExt` trait | `task.rs` | ✅ |
-| `Awaitable` trait | `awaitable.rs` | ✅ |
-| `ReadyAwaitable` trait | `awaitable.rs` | ✅ |
-| `at_coroutine_exit(fn)` | `at_exit.rs` | ✅ |
-| `scope_exit(fn)` | `at_exit.rs` | ✅ |
-| `DeferredCleanup` | `at_exit.rs` | ✅ |
-
-### Phase 15: Future Bridge (`src/future/`)
-
-| Component | File | Status |
-|-----------|------|--------|
-| `SenderToFutureExt` trait | `sender_to_future.rs` | ✅ |
-| `SenderFuture<S>` | `sender_to_future.rs` | ✅ |
-| `SenderFutureError<E>` | `sender_to_future.rs` | ✅ |
-| `FutureReceiver<V, E>` | `sender_to_future.rs` | ✅ |
-| `from_future(F)` | `future_to_sender.rs` | ✅ |
-| `FutureSender<F>` | `future_to_sender.rs` | ✅ |
-| `FutureToSenderExt` trait | `future_to_sender.rs` | ✅ |
-
-### Phase 16: Networking (`src/net/`)
-
-Following the P2762 async I/O proposal pattern with sender-based operations.
-
-| Component | File | Status |
-|-----------|------|--------|
-| `IoContext` | `io_context.rs` | ✅ |
-| `IoContextScheduler` | `io_context.rs` | ✅ |
-| `TcpListener` | `socket.rs` | ✅ |
-| `TcpStream` | `socket.rs` | ✅ |
-| `async_accept(listener, ctx)` | `operations.rs` | ✅ |
-| `async_accept_arc(listener, ctx)` | `operations.rs` | ✅ |
-| `async_receive(stream, ctx, buf)` | `operations.rs` | ✅ |
-| `async_receive_into(client, ctx)` | `operations.rs` | ✅ |
-| `async_send(stream, ctx, buf)` | `operations.rs` | ✅ |
-| `async_send_from(client, ctx)` | `operations.rs` | ✅ |
-| `ClientState` | `operations.rs` | ✅ |
-| `Buffer` / `MutBuffer` traits | `buffer.rs` | ✅ |
-
----
-
-## Not Yet Implemented
-
-### Phase 10: Sequence Senders (Partial)
-- ✅ `SequenceSender` trait - `traits.rs`
-- ✅ `iterate(range)` - `iterate.rs`
-- ✅ `empty_sequence()` - `empty.rs`
-- ⚠️ `merge(seq1, seq2)` - Not implemented
-- ⚠️ `transform_each(seq, adaptor)` - Partial (wrapper only)
-- ⚠️ `ignore_all_values(seq)` - Partial (wrapper only)
-
----
-
-## Examples (`examples/`)
-
-| Example | Description |
-|---------|-------------|
-| `tokio_echo.rs` | Tokio-based echo server (baseline) |
-| `exec_echo.rs` | exec-rs async sender/receiver + AsyncScope |
-| `benchmark.sh` | Automated benchmark script |
-
-### Benchmark Results (Single-threaded, 1 worker thread each)
+Single-threaded echo server comparison:
 
 | Server | Light (50 conn) | Medium (200) | Heavy (500) | Large (4KB) |
 |--------|-----------------|--------------|-------------|-------------|
 | **Tokio** | 104,601 req/s | 114,478 | 107,333 | 85,745 |
-| **exec-rs Async** | **114,723 req/s** | **130,694** | **135,157** | **100,321** |
+| **exec-rs** | **114,723 req/s** | **130,694** | **135,157** | **100,321** |
 
-**exec-rs async outperforms Tokio by 10-26% in single-threaded mode**, demonstrating the efficiency of the sender/receiver model with direct mio integration.
+exec-rs outperforms Tokio by **10-26%** in single-threaded mode.
 
-### Echo Server Architecture (exec_echo.rs)
+## Known Limitations
 
-```
-repeat_effect(
-    async_accept(server)
-    | then(|(stream, addr)| { scope.spawn(echo_client); })
-)
-
-// Client echo loop (runs until EOF)
-repeat_effect_until(
-    async_receive_into(client)
-       | then(|n| { client.done = (n == 0); })
-       | let_value(|| async_send_from(client)),
-    || client.done
-)
-```
-
-Key features:
-- **Structured concurrency**: AsyncScope tracks all client handlers
-- **Sender composition**: `repeat_effect`, `then`, `let_value` chain
-- **Clone-based iteration**: Senders cloned each iteration (matching stdexec)
-- **mio integration**: Direct epoll/kqueue event loop
-
----
-
-## Architecture Highlights
-
-### Core Design Patterns
-1. **Sender/Receiver Model**: Lazy async work representation
-2. **Operation State**: Pinned state machine for execution
-3. **Completion Signatures**: Type-level encoding of possible outcomes
-4. **Environment Queries**: Extensible context propagation
-
-### Key Features
-- **Zero-cost abstractions**: No heap allocation for basic operations
-- **Type-safe composition**: Compile-time checked sender pipelines
-- **Structured concurrency**: Scopes ensure proper lifetime management
-- **Cancellation support**: Stop tokens propagate through pipelines
-- **Async I/O**: mio-based networking with sender operations
-
-### Thread Safety
-- All schedulers are `Send + Sync`
-- Thread pool uses work-stealing for load balancing
-- Proper condvar synchronization (no busy-waiting)
-
----
-
-## Code Quality
-
-- **195 unit tests** covering all major functionality
-- **44 doc tests** with usage examples (26 ignored)
-- **Warnings**: Minimal
-- **Unsafe code**: Minimized, only where necessary for pinning and interior mutability
-
----
+- **Nested `when_all`**: The `WhenAllReceiver` types don't implement `Clone`, preventing nested `when_all` calls. Use sequential pairs instead.
+- **Sequence senders**: `merge` and `transform_each` are partially implemented.
 
 ## References
 
-- [P2300R10 Specification](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p2300r10.html)
+- [P2300R10 std::execution](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p2300r10.html)
 - [P2762 Sender/Receiver Async I/O](https://wg21.link/p2762)
 - [NVIDIA/stdexec](https://github.com/NVIDIA/stdexec) - Reference implementation
-- [kuhllib echo_server](https://github.com/kirkshoop/kuhllib/blob/main/src/examples/echo_server.cpp) - Pattern reference
+
+## License
+
+Apache-2.0

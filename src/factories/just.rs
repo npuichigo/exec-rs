@@ -404,7 +404,209 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::VoidReceiver;
+    use crate::consumers::sync_wait;
+    use crate::traits::{Sender, VoidReceiver};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // ========================================================================
+    // test_just.cpp equivalents
+    // ========================================================================
+
+    #[test]
+    fn test_just_simple_value() {
+        let result = sync_wait(just(42)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_just_string_value() {
+        let result = sync_wait(just(String::from("hello"))).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_just_unit_value() {
+        let result = sync_wait(just(())).unwrap();
+        assert_eq!(result, ());
+    }
+
+    #[test]
+    fn test_just_tuple_value() {
+        let result = sync_wait(just((1, 2, 3))).unwrap();
+        assert_eq!(result, (1, 2, 3));
+    }
+
+    #[test]
+    fn test_just_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = just(42);
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_just_move_only_value() {
+        let boxed = Box::new(42);
+        let result = sync_wait(just(boxed)).unwrap();
+        assert_eq!(*result, 42);
+    }
+
+    #[test]
+    fn test_just_zero_copy() {
+        #[derive(Debug)]
+        struct CountedValue {
+            value: i32,
+            clone_count: Arc<AtomicUsize>,
+        }
+
+        impl Clone for CountedValue {
+            fn clone(&self) -> Self {
+                self.clone_count.fetch_add(1, Ordering::SeqCst);
+                CountedValue {
+                    value: self.value,
+                    clone_count: self.clone_count.clone(),
+                }
+            }
+        }
+
+        let clone_count = Arc::new(AtomicUsize::new(0));
+        let v = CountedValue {
+            value: 42,
+            clone_count: clone_count.clone(),
+        };
+
+        let result = sync_wait(just(v)).unwrap();
+        assert_eq!(result.value, 42);
+        assert_eq!(clone_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_just_with_vec() {
+        let v = vec![1, 2, 3, 4, 5];
+        let result = sync_wait(just(v)).unwrap();
+        assert_eq!(result, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_just_with_option() {
+        let result = sync_wait(just(Some(42))).unwrap();
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn test_just_with_result() {
+        let result = sync_wait(just(Ok::<i32, &str>(42))).unwrap();
+        assert_eq!(result, Ok(42));
+    }
+
+    // ========================================================================
+    // test_just_error.cpp equivalents
+    // ========================================================================
+
+    #[test]
+    fn test_just_error_string() {
+        let result = sync_wait(just_error::<_>("error"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_just_error_custom_type() {
+        #[derive(Debug, PartialEq)]
+        struct MyError(i32);
+
+        let result = sync_wait(just_error::<_>(MyError(42)));
+        match result {
+            Err(crate::consumers::SyncWaitError::Error(e)) => assert_eq!(e, MyError(42)),
+            _ => panic!("Expected error"),
+        }
+    }
+
+    #[test]
+    fn test_just_error_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = just_error::<_>("error");
+        assert_sender(&s);
+    }
+
+    // ========================================================================
+    // test_just_stopped.cpp equivalents
+    // ========================================================================
+
+    #[test]
+    fn test_just_stopped_completes_with_stopped() {
+        let result = sync_wait(just_stopped());
+        match result {
+            Err(crate::consumers::SyncWaitError::Stopped) => (),
+            _ => panic!("Expected stopped"),
+        }
+    }
+
+    #[test]
+    fn test_just_stopped_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = just_stopped();
+        assert_sender(&s);
+    }
+
+    // ========================================================================
+    // test_just_from equivalents
+    // ========================================================================
+
+    #[test]
+    fn test_just_from_simple() {
+        let result = sync_wait(just_from(|| 42)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_just_from_with_capture() {
+        let x = 10;
+        let result = sync_wait(just_from(move || x * 2)).unwrap();
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn test_just_from_string() {
+        let result = sync_wait(just_from(|| String::from("computed"))).unwrap();
+        assert_eq!(result, "computed");
+    }
+
+    #[test]
+    fn test_just_from_side_effect() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = called.clone();
+
+        let result = sync_wait(just_from(move || {
+            called_clone.store(true, Ordering::SeqCst);
+            42
+        }))
+        .unwrap();
+
+        assert_eq!(result, 42);
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_just_from_closure_not_called_until_started() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let sender = just_from(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            "done"
+        });
+
+        // Factory function should not be called until started
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        let result = sync_wait(sender).unwrap();
+        assert_eq!(result, "done");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    // ========================================================================
+    // Original basic tests
+    // ========================================================================
 
     #[test]
     fn test_just_creates_sender() {
@@ -432,9 +634,6 @@ mod tests {
 
     #[test]
     fn test_just_from_calls_function() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = called.clone();
 

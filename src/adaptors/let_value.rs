@@ -171,7 +171,12 @@ where
 mod tests {
     use super::*;
     use crate::consumers::sync_wait;
-    use crate::factories::just;
+    use crate::factories::{just, just_error};
+    use crate::traits::SenderExt;
+
+    // ========================================================================
+    // test_let_value.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_let_value_basic() {
@@ -183,5 +188,63 @@ mod tests {
     fn test_let_value_type_change() {
         let result = sync_wait(let_value(just(42), |x| just(format!("value: {}", x)))).unwrap();
         assert_eq!(result, "value: 42");
+    }
+
+    #[test]
+    fn test_let_value_chained() {
+        let result =
+            sync_wait(let_value(let_value(just(10), |x| just(x + 5)), |x| just(x * 2))).unwrap();
+        assert_eq!(result, 30);
+    }
+
+    #[test]
+    fn test_let_value_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = let_value(just(42), |x| just(x));
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_let_value_with_sender_ext() {
+        let result = sync_wait(just(21).let_value(|x| just(x * 2))).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_let_value_preserves_error() {
+        // Use compatible error types (both &str)
+        let result = sync_wait(let_value(
+            just_error::<_>("error"),
+            |_: ()| just_error::<_>("never reached"),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_let_value_nested() {
+        let result = sync_wait(
+            just(1).let_value(|a| {
+                just(2).let_value(move |b| just(3).let_value(move |c| just(a + b + c)))
+            }),
+        )
+        .unwrap();
+        assert_eq!(result, 6);
+    }
+
+    #[test]
+    fn test_let_value_with_computation() {
+        let result = sync_wait(let_value(just(10), |x| {
+            let doubled = x * 2;
+            just(doubled + 5)
+        }))
+        .unwrap();
+        assert_eq!(result, 25);
+    }
+
+    #[test]
+    fn test_let_value_move_only() {
+        let boxed = Box::new(21i32);
+        let result = sync_wait(let_value(just(boxed), |b: Box<i32>| just(*b * 2))).unwrap();
+        assert_eq!(result, 42);
     }
 }

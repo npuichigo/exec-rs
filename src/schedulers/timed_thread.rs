@@ -261,6 +261,7 @@ impl CompletionSignatures for TimedScheduleCompletions {
 }
 
 /// Sender returned by `TimedThreadScheduler::schedule_at()`.
+#[derive(Clone)]
 pub struct TimedThreadScheduleSender {
     inner: Arc<TimedThreadInner>,
     when: Instant,

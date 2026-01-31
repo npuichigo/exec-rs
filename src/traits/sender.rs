@@ -144,6 +144,99 @@ pub trait SenderExt: Sender {
     {
         crate::adaptors::ContinuesOn::new(self, scheduler)
     }
+
+    /// Execute a function for each index in a range.
+    ///
+    /// When the upstream sender completes with a value, the function is called
+    /// with each index from 0 to shape (exclusive) and a mutable reference to the value.
+    ///
+    /// ```rust,ignore
+    /// just(0).bulk(10, |i, sum| { *sum += i; })
+    /// ```
+    fn bulk<F>(self, shape: usize, func: F) -> crate::adaptors::Bulk<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(usize, &mut <Self::Completions as CompletionSignatures>::Value),
+    {
+        crate::adaptors::Bulk::new(self, shape, func)
+    }
+
+    /// Convert a single-shot sender into a multi-shot sender.
+    ///
+    /// The underlying sender is started at most once, and its result
+    /// is shared with all waiting receivers.
+    fn split(self) -> crate::adaptors::Split<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::split(self)
+    }
+
+    /// Transform stopped completion to `None`, values to `Some`.
+    fn stopped_as_optional(self) -> crate::adaptors::StoppedAsOptional<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::StoppedAsOptional::new(self)
+    }
+
+    /// Transform stopped completion to an error.
+    fn stopped_as_error<E>(self, error: E) -> crate::adaptors::StoppedAsError<Self, E>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::StoppedAsError::new(self, error)
+    }
+
+    /// Wrap value completion in `Option<T>`.
+    fn into_variant(self) -> crate::adaptors::IntoVariant<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::IntoVariant::new(self)
+    }
+
+    /// Wrap value in a single-element tuple.
+    fn into_tuple(self) -> crate::adaptors::IntoTuple<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::IntoTuple::new(self)
+    }
+
+    /// Materialize all completions into a `Completion` enum value.
+    fn materialize(self) -> crate::adaptors::Materialize<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::Materialize::new(self)
+    }
+
+    /// Run cleanup sender after this sender completes (regardless of how).
+    fn finally<S2>(self, cleanup: S2) -> crate::adaptors::Finally<Self, S2>
+    where
+        Self: Sized,
+        S2: Sender,
+    {
+        crate::adaptors::Finally::new(self, cleanup)
+    }
+
+    /// Run this sender on a specific scheduler.
+    fn on<Sch>(self, scheduler: Sch) -> crate::adaptors::On<Sch, Self>
+    where
+        Self: Sized,
+        Sch: crate::traits::Scheduler,
+    {
+        crate::adaptors::On::new(scheduler, self)
+    }
+
+    /// Check stop token and complete with stopped if requested.
+    fn unless_stopped(self) -> crate::adaptors::UnlessStopped<Self>
+    where
+        Self: Sized,
+    {
+        crate::adaptors::UnlessStopped::new(self)
+    }
 }
 
 // Blanket implementation for all senders

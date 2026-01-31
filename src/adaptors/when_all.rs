@@ -3,6 +3,9 @@
 //! `when_all` runs multiple senders concurrently and collects all their results
 //! into a tuple. If any sender fails or is stopped, the entire operation fails
 //! or stops.
+//!
+//! This implementation is allocation-free, matching C++ stdexec's design.
+//! The state lives inline in the operation and receivers hold raw pointers.
 
 use crate::stop::{InplaceStopSource, InplaceStopToken, StopSource};
 use crate::traits::{
@@ -11,9 +14,9 @@ use crate::traits::{
 };
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
 /// State flags for when_all.
 const STATE_STARTED: u8 = 0;
@@ -89,25 +92,21 @@ where
     type Operation = WhenAllOperation<S1, S2, R, V1, V2, E>;
 
     fn connect(self, receiver: R) -> Self::Operation {
-        let state = Arc::new(WhenAllState::new(receiver));
-
-        let receiver1 = WhenAllReceiver1 {
-            state: state.clone(),
-        };
-        let receiver2 = WhenAllReceiver2 {
-            state: state.clone(),
-        };
-
         WhenAllOperation {
-            state,
-            op1: UnsafeCell::new(Some(self.sender1.connect(receiver1))),
-            op2: UnsafeCell::new(Some(self.sender2.connect(receiver2))),
+            // Store senders - they will be connected in start()
+            sender1: Some(self.sender1),
+            sender2: Some(self.sender2),
+            // State is inline - no heap allocation!
+            state: WhenAllState::new(receiver),
+            // Operations are created in start() after we're pinned
+            op1: UnsafeCell::new(MaybeUninit::uninit()),
+            op2: UnsafeCell::new(MaybeUninit::uninit()),
             started: false,
         }
     }
 }
 
-/// Shared state for when_all operation.
+/// Inline state for when_all operation - no heap allocation.
 struct WhenAllState<V1, V2, E, R> {
     /// Atomic state: started, error, or stopped.
     state: AtomicU8,
@@ -148,7 +147,10 @@ where
 
     /// Called when a child operation completes. Decrements counter and
     /// completes if this is the last one.
-    fn arrive(self: &Arc<Self>) {
+    ///
+    /// SAFETY: Called via raw pointer from receivers. The pointer is valid
+    /// because the WhenAllOperation is pinned and outlives all receivers.
+    unsafe fn arrive(&self) {
         if self.count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.complete();
         }
@@ -220,9 +222,18 @@ impl Environment for WhenAllEnv {
 }
 
 /// Receiver for the first sender in when_all.
+///
+/// Holds a raw pointer to the inline state. This is safe because:
+/// 1. The WhenAllOperation is pinned when start() is called
+/// 2. The receiver is consumed when completion signals are delivered
+/// 3. The operation outlives all child operations
 pub struct WhenAllReceiver1<V1, V2, E, R> {
-    state: Arc<WhenAllState<V1, V2, E, R>>,
+    state: *const WhenAllState<V1, V2, E, R>,
 }
+
+// SAFETY: The pointer points to a WhenAllState that is Send+Sync
+unsafe impl<V1: Send, V2: Send, E: Send, R: Send> Send for WhenAllReceiver1<V1, V2, E, R> {}
+unsafe impl<V1: Send, V2: Send, E: Send, R: Send> Sync for WhenAllReceiver1<V1, V2, E, R> {}
 
 impl<V1, V2, E, R> Receiver for WhenAllReceiver1<V1, V2, E, R>
 where
@@ -231,8 +242,6 @@ where
     type Env = WhenAllEnv;
 
     fn get_env(&self) -> &Self::Env {
-        // Return environment with the when_all's stop token
-        // This is a slight simplification - in production we'd manage this better
         thread_local! {
             static ENV: WhenAllEnv = WhenAllEnv {
                 stop_token: InplaceStopToken::new_detached(),
@@ -247,12 +256,12 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_value(self, value: V1) {
-        // Store the value
+        // SAFETY: Pointer is valid because operation is pinned
+        let state = unsafe { &*self.state };
         unsafe {
-            *self.state.value1.get() = Some(value);
+            *state.value1.get() = Some(value);
+            state.arrive();
         }
-        // Arrive at the barrier
-        self.state.arrive();
     }
 }
 
@@ -261,8 +270,9 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_error(self, error: E) {
-        self.state.set_error(error);
-        self.state.arrive();
+        let state = unsafe { &*self.state };
+        state.set_error(error);
+        unsafe { state.arrive() };
     }
 }
 
@@ -271,15 +281,19 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_stopped(self) {
-        self.state.set_stopped();
-        self.state.arrive();
+        let state = unsafe { &*self.state };
+        state.set_stopped();
+        unsafe { state.arrive() };
     }
 }
 
 /// Receiver for the second sender in when_all.
 pub struct WhenAllReceiver2<V1, V2, E, R> {
-    state: Arc<WhenAllState<V1, V2, E, R>>,
+    state: *const WhenAllState<V1, V2, E, R>,
 }
+
+unsafe impl<V1: Send, V2: Send, E: Send, R: Send> Send for WhenAllReceiver2<V1, V2, E, R> {}
+unsafe impl<V1: Send, V2: Send, E: Send, R: Send> Sync for WhenAllReceiver2<V1, V2, E, R> {}
 
 impl<V1, V2, E, R> Receiver for WhenAllReceiver2<V1, V2, E, R>
 where
@@ -302,10 +316,11 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_value(self, value: V2) {
+        let state = unsafe { &*self.state };
         unsafe {
-            *self.state.value2.get() = Some(value);
+            *state.value2.get() = Some(value);
+            state.arrive();
         }
-        self.state.arrive();
     }
 }
 
@@ -314,8 +329,9 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_error(self, error: E) {
-        self.state.set_error(error);
-        self.state.arrive();
+        let state = unsafe { &*self.state };
+        state.set_error(error);
+        unsafe { state.arrive() };
     }
 }
 
@@ -324,29 +340,38 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn set_stopped(self) {
-        self.state.set_stopped();
-        self.state.arrive();
+        let state = unsafe { &*self.state };
+        state.set_stopped();
+        unsafe { state.arrive() };
     }
 }
 
-/// Operation state for WhenAll.
+/// Operation state for WhenAll - allocation-free.
+///
+/// The state is stored inline and receivers hold raw pointers to it.
+/// This is safe because the operation is pinned when start() is called.
 pub struct WhenAllOperation<S1, S2, R, V1, V2, E>
 where
     S1: SenderTo<WhenAllReceiver1<V1, V2, E, R>>,
     S2: SenderTo<WhenAllReceiver2<V1, V2, E, R>>,
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
-    state: Arc<WhenAllState<V1, V2, E, R>>,
-    op1: UnsafeCell<Option<S1::Operation>>,
-    op2: UnsafeCell<Option<S2::Operation>>,
+    /// Senders stored until start() - then moved out
+    sender1: Option<S1>,
+    sender2: Option<S2>,
+    /// Inline state - no heap allocation
+    state: WhenAllState<V1, V2, E, R>,
+    /// Child operations - initialized in start() after we're pinned
+    op1: UnsafeCell<MaybeUninit<S1::Operation>>,
+    op2: UnsafeCell<MaybeUninit<S2::Operation>>,
     started: bool,
 }
 
 // SAFETY: The operations are only accessed from the thread that calls start().
 unsafe impl<S1, S2, R, V1, V2, E> Send for WhenAllOperation<S1, S2, R, V1, V2, E>
 where
-    S1: SenderTo<WhenAllReceiver1<V1, V2, E, R>>,
-    S2: SenderTo<WhenAllReceiver2<V1, V2, E, R>>,
+    S1: SenderTo<WhenAllReceiver1<V1, V2, E, R>> + Send,
+    S2: SenderTo<WhenAllReceiver2<V1, V2, E, R>> + Send,
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped + Send,
     V1: Send,
     V2: Send,
@@ -363,6 +388,7 @@ where
     R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
 {
     fn start(self: Pin<&mut Self>) {
+        // SAFETY: We don't move self, only access fields
         let this = unsafe { self.get_unchecked_mut() };
 
         if this.started {
@@ -370,13 +396,49 @@ where
         }
         this.started = true;
 
+        // Take the senders - they're consumed here
+        let sender1 = this.sender1.take().expect("sender1 already taken");
+        let sender2 = this.sender2.take().expect("sender2 already taken");
+
+        // Create receivers with raw pointers to our inline state.
+        // SAFETY: The operation is now pinned, so the state pointer is stable.
+        let state_ptr = &this.state as *const WhenAllState<V1, V2, E, R>;
+
+        let receiver1 = WhenAllReceiver1 { state: state_ptr };
+        let receiver2 = WhenAllReceiver2 { state: state_ptr };
+
+        // Connect senders to receivers and store operations
+        let op1 = sender1.connect(receiver1);
+        let op2 = sender2.connect(receiver2);
+
+        unsafe {
+            (*this.op1.get()).write(op1);
+            (*this.op2.get()).write(op2);
+        }
+
         // Start both operations
         unsafe {
-            if let Some(op1) = (*this.op1.get()).as_mut() {
-                Pin::new_unchecked(op1).start();
-            }
-            if let Some(op2) = (*this.op2.get()).as_mut() {
-                Pin::new_unchecked(op2).start();
+            let op1_ptr = (*this.op1.get()).as_mut_ptr();
+            let op2_ptr = (*this.op2.get()).as_mut_ptr();
+
+            Pin::new_unchecked(&mut *op1_ptr).start();
+            Pin::new_unchecked(&mut *op2_ptr).start();
+        }
+    }
+}
+
+impl<S1, S2, R, V1, V2, E> Drop for WhenAllOperation<S1, S2, R, V1, V2, E>
+where
+    S1: SenderTo<WhenAllReceiver1<V1, V2, E, R>>,
+    S2: SenderTo<WhenAllReceiver2<V1, V2, E, R>>,
+    R: ReceiverOf<(V1, V2)> + ReceiverOfError<E> + ReceiverOfStopped,
+{
+    fn drop(&mut self) {
+        // Only drop the operations if they were initialized (i.e., if start() was called)
+        if self.started {
+            unsafe {
+                std::ptr::drop_in_place((*self.op1.get()).as_mut_ptr());
+                std::ptr::drop_in_place((*self.op2.get()).as_mut_ptr());
             }
         }
     }
@@ -385,8 +447,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adaptors::then;
     use crate::consumers::sync_wait;
-    use crate::factories::just;
+    use crate::factories::{just, just_error, schedule};
+    use crate::schedulers::InlineScheduler;
+    use crate::traits::Sender;
+
+    // ========================================================================
+    // test_when_all.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_when_all_basic() {
@@ -414,5 +483,69 @@ mod tests {
     fn test_when_all_unit() {
         let result = sync_wait(when_all(just(()), just(()))).unwrap();
         assert_eq!(result, ((), ()));
+    }
+
+    #[test]
+    fn test_when_all_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = when_all(just(1), just(2));
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_when_all_sum_values() {
+        let (a, b) = sync_wait(when_all(just(10), just(20))).unwrap();
+        assert_eq!(a + b, 30);
+    }
+
+    #[test]
+    fn test_when_all_first_error() {
+        // Both senders must have the same error type
+        let result = sync_wait(when_all(
+            just_error::<_>("error1"),
+            just_error::<_>("error2"),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_when_all_both_errors() {
+        // Both complete with errors
+        let result = sync_wait(when_all(
+            just_error::<_>("first"),
+            just_error::<_>("second"),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_when_all_with_schedule() {
+        let scheduler = InlineScheduler;
+        let result = sync_wait(when_all(
+            then(schedule(scheduler), |_| 1),
+            then(schedule(scheduler), |_| 2),
+        ))
+        .unwrap();
+        assert_eq!(result, (1, 2));
+    }
+
+
+    #[test]
+    fn test_when_all_move_only_values() {
+        let b1 = Box::new(1);
+        let b2 = Box::new(2);
+        let result = sync_wait(when_all(just(b1), just(b2))).unwrap();
+        assert_eq!(*result.0, 1);
+        assert_eq!(*result.1, 2);
+    }
+
+    #[test]
+    fn test_when_all_with_transformation() {
+        let result = sync_wait(when_all(
+            then(just(10), |x| x * 2),
+            then(just(5), |x| x * 3),
+        ))
+        .unwrap();
+        assert_eq!(result, (20, 15));
     }
 }

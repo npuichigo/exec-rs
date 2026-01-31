@@ -1,11 +1,18 @@
 //! Repeat adaptors - repeat sender execution.
 //!
-//! - `repeat_effect(factory)` - repeat a sender forever (until error/stopped)
-//! - `repeat_n(factory, n)` - repeat a sender N times
-//! - `repeat_effect_until(factory)` - repeat until the sender returns true
+//! All repeat adaptors take a factory function that creates senders:
+//! - `repeat_effect(factory)` - repeat forever (until error/stopped)
+//! - `repeat_n(factory, n)` - repeat N times
+//! - `repeat_effect_until(factory, predicate)` - repeat until predicate returns true
 //!
-//! These adaptors use the trampoline scheduler internally to prevent
-//! stack overflow when iterating many times.
+//! Using factories instead of Clone is more idiomatic Rust:
+//! - Explicit about when senders are created
+//! - No hidden Clone calls
+//! - More flexible (factory can capture state, create different senders per iteration)
+//!
+//! These implementations are allocation-free, matching C++ stdexec's design.
+//! The state lives inline in the operation and receivers hold raw pointers.
+//! A trampoline scheduler prevents stack overflow for deep iterations.
 
 use crate::schedulers::trampoline_submit;
 use crate::traits::{
@@ -14,265 +21,31 @@ use crate::traits::{
 };
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::Arc;
 
-// ============================================================================
-// repeat_effect - repeat a sender forever
-// ============================================================================
+/// Environment for repeat receivers.
+pub struct RepeatEnv;
 
-/// Repeat a sender forever (until error or stopped).
-///
-/// This is useful for accept loops that should run continuously.
-/// The sender must implement `Clone` and complete with `()`. After each
-/// completion, the sender is cloned and started again.
-///
-/// This matches the stdexec pattern where the sender is stored and
-/// reconnected each iteration.
-///
-/// # Example
-///
-/// ```rust
-/// use exec_rs::adaptors::{repeat_effect, then};
-/// use exec_rs::factories::just;
-/// use std::sync::atomic::{AtomicUsize, Ordering};
-/// use std::sync::Arc;
-///
-/// let counter = Arc::new(AtomicUsize::new(0));
-/// let counter_clone = counter.clone();
-///
-/// // This would run forever, so we use repeat_n for the test
-/// let sender = then(just(()), move |_: ()| {
-///     counter_clone.fetch_add(1, Ordering::SeqCst);
-/// });
-///
-/// // repeat_effect(sender) would run forever
-/// ```
-pub fn repeat_effect<S, E>(sender: S) -> RepeatEffect<S, E>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
-{
-    RepeatEffect {
-        sender,
-        _phantom: PhantomData,
-    }
-}
+impl Environment for RepeatEnv {
+    type StopToken = crate::stop::NeverStopToken;
 
-/// A sender that repeats another sender forever.
-pub struct RepeatEffect<S, E> {
-    sender: S,
-    _phantom: PhantomData<E>,
-}
-
-impl<S: Clone, E> Clone for RepeatEffect<S, E> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<S, E> std::fmt::Debug for RepeatEffect<S, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RepeatEffect").finish()
-    }
-}
-
-/// Completion signatures for repeat_effect.
-/// Note: Value is `!` (never) since it runs forever, but we use () for simplicity.
-pub struct RepeatEffectCompletions<E> {
-    _phantom: PhantomData<E>,
-}
-
-impl<E> CompletionSignatures for RepeatEffectCompletions<E> {
-    type Value = (); // Never actually completes with value
-    type Error = E;
-    const SENDS_STOPPED: bool = true;
-}
-
-impl<S, E> Sender for RepeatEffect<S, E>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
-{
-    type Completions = RepeatEffectCompletions<E>;
-}
-
-impl<S, E, R> SenderTo<R> for RepeatEffect<S, E>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectInnerReceiver<E, R>>
-        + Clone
-        + Send
-        + 'static,
-    <S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation: Send,
-    E: Send + 'static,
-    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
-{
-    type Operation = RepeatEffectOperation<S, E, R>;
-
-    fn connect(self, receiver: R) -> Self::Operation {
-        RepeatEffectOperation {
-            state: Arc::new(RepeatEffectState {
-                sender: self.sender,
-                receiver: UnsafeCell::new(Some(receiver)),
-                current_op: UnsafeCell::new(None),
-                _phantom: PhantomData,
-            }),
-        }
-    }
-}
-
-struct RepeatEffectState<S, E, R>
-where
-    S: SenderTo<RepeatEffectInnerReceiver<E, R>>,
-{
-    sender: S,
-    receiver: UnsafeCell<Option<R>>,
-    current_op: UnsafeCell<Option<<S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation>>,
-    _phantom: PhantomData<E>,
-}
-
-unsafe impl<S: Send, E, R: Send> Send for RepeatEffectState<S, E, R>
-where
-    S: SenderTo<RepeatEffectInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-unsafe impl<S: Send, E, R: Send> Sync for RepeatEffectState<S, E, R>
-where
-    S: SenderTo<RepeatEffectInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-
-/// Operation state for repeat_effect.
-pub struct RepeatEffectOperation<S, E, R>
-where
-    S: SenderTo<RepeatEffectInnerReceiver<E, R>>,
-{
-    state: Arc<RepeatEffectState<S, E, R>>,
-}
-
-/// Inner receiver for repeat_effect iterations.
-pub struct RepeatEffectInnerReceiver<E, R> {
-    on_value: Box<dyn FnOnce(()) + Send>,
-    on_error: Box<dyn FnOnce(E) + Send>,
-    on_stopped: Box<dyn FnOnce() + Send>,
-    _phantom: PhantomData<R>,
-}
-
-impl<E, R> Receiver for RepeatEffectInnerReceiver<E, R> {
-    type Env = RepeatEnv;
-
-    fn get_env(&self) -> &Self::Env {
-        &RepeatEnv
-    }
-}
-
-impl<E, R> ReceiverOf<()> for RepeatEffectInnerReceiver<E, R> {
-    fn set_value(self, _: ()) {
-        (self.on_value)(());
-    }
-}
-
-impl<E, R> ReceiverOfError<E> for RepeatEffectInnerReceiver<E, R> {
-    fn set_error(self, error: E) {
-        (self.on_error)(error);
-    }
-}
-
-impl<E, R> ReceiverOfStopped for RepeatEffectInnerReceiver<E, R> {
-    fn set_stopped(self) {
-        (self.on_stopped)();
-    }
-}
-
-impl<S, E, R> RepeatEffectState<S, E, R>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectInnerReceiver<E, R>>
-        + Clone
-        + Send
-        + 'static,
-    <S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation: Send,
-    E: Send + 'static,
-    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
-{
-    fn start_iteration(self: &Arc<Self>) {
-        let state_for_value = self.clone();
-        let state_for_error = self.clone();
-        let state_for_stopped = self.clone();
-
-        let inner_receiver = RepeatEffectInnerReceiver {
-            on_value: Box::new(move |_| state_for_value.on_value()),
-            on_error: Box::new(move |e| state_for_error.on_error(e)),
-            on_stopped: Box::new(move || state_for_stopped.on_stopped()),
-            _phantom: PhantomData,
-        };
-
-        // Clone the sender for this iteration (like stdexec reconnecting)
-        let sender = self.sender.clone();
-        let op = sender.connect(inner_receiver);
-        unsafe {
-            *self.current_op.get() = Some(op);
-            if let Some(op) = (*self.current_op.get()).as_mut() {
-                Pin::new_unchecked(op).start();
-            }
-        }
-    }
-
-    fn on_value(self: &Arc<Self>) {
-        // Clear current op and start next iteration
-        unsafe {
-            *self.current_op.get() = None;
-        }
-        // Use trampoline to prevent stack overflow
-        let state = self.clone();
-        trampoline_submit(move || {
-            state.start_iteration();
-        });
-    }
-
-    fn on_error(self: &Arc<Self>, error: E) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
-            receiver.set_error(error);
-        }
-    }
-
-    fn on_stopped(self: &Arc<Self>) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
-            receiver.set_stopped();
-        }
-    }
-}
-
-impl<S, E, R> OperationState for RepeatEffectOperation<S, E, R>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectInnerReceiver<E, R>>
-        + Clone
-        + Send
-        + 'static,
-    <S as SenderTo<RepeatEffectInnerReceiver<E, R>>>::Operation: Send,
-    E: Send + 'static,
-    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
-{
-    fn start(self: Pin<&mut Self>) {
-        self.state.start_iteration();
+    fn get_stop_token(&self) -> Self::StopToken {
+        crate::stop::NeverStopToken
     }
 }
 
 // ============================================================================
-// repeat_n - repeat a sender N times
+// repeat_n - repeat N times using a factory (ALLOCATION-FREE)
 // ============================================================================
 
-/// Repeat a sender N times.
+/// Repeat N times using a factory function to create each sender.
 ///
-/// The sender must implement `Clone` and complete with `()`. After N successful
-/// completions, the overall sender completes with `()`.
+/// The factory receives the iteration index (0-indexed). Each sender runs
+/// sequentially after the previous completes, so delays naturally accumulate.
+///
+/// This implementation is allocation-free - the state lives inline and
+/// receivers hold raw pointers to the pinned operation.
 ///
 /// # Example
 ///
@@ -284,45 +57,46 @@ where
 /// use std::sync::Arc;
 ///
 /// let counter = Arc::new(AtomicUsize::new(0));
-/// let counter_clone = counter.clone();
+/// let c = counter.clone();
 ///
-/// let sender = then(just(()), move |_: ()| {
-///     counter_clone.fetch_add(1, Ordering::SeqCst);
-/// });
+/// let sender = repeat_n(move |_i| {
+///     let c = c.clone();
+///     then(just(()), move |_| { c.fetch_add(1, Ordering::SeqCst); })
+/// }, 5);
 ///
-/// let result = sync_wait(repeat_n(sender, 5)).unwrap();
-/// assert_eq!(result, ());
+/// sync_wait(sender).unwrap();
 /// assert_eq!(counter.load(Ordering::SeqCst), 5);
 /// ```
-pub fn repeat_n<S, E>(sender: S, count: usize) -> RepeatN<S, E>
+pub fn repeat_n<F, S, E>(factory: F, count: usize) -> RepeatN<F, S, E>
 where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
+    F: Fn(usize) -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
 {
     RepeatN {
-        sender,
+        factory,
         count,
         _phantom: PhantomData,
     }
 }
 
-/// A sender that repeats another sender N times.
-pub struct RepeatN<S, E> {
-    sender: S,
+/// A sender that repeats using a factory function N times.
+pub struct RepeatN<F, S, E> {
+    factory: F,
     count: usize,
-    _phantom: PhantomData<E>,
+    _phantom: PhantomData<(S, E)>,
 }
 
-impl<S: Clone, E> Clone for RepeatN<S, E> {
+impl<F: Clone, S, E> Clone for RepeatN<F, S, E> {
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            factory: self.factory.clone(),
             count: self.count,
             _phantom: PhantomData,
         }
     }
 }
 
-impl<S, E> std::fmt::Debug for RepeatN<S, E> {
+impl<F, S, E> std::fmt::Debug for RepeatN<F, S, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepeatN")
             .field("count", &self.count)
@@ -341,81 +115,34 @@ impl<E> CompletionSignatures for RepeatNCompletions<E> {
     const SENDS_STOPPED: bool = true;
 }
 
-impl<S, E> Sender for RepeatN<S, E>
+impl<F, S, E> Sender for RepeatN<F, S, E>
 where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
+    F: Fn(usize) -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
 {
     type Completions = RepeatNCompletions<E>;
 }
 
-impl<S, E, R> SenderTo<R> for RepeatN<S, E>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatNInnerReceiver<E, R>>
-        + Clone
-        + Send
-        + 'static,
-    <S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation: Send,
-    E: Send + 'static,
-    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
-{
-    type Operation = RepeatNOperation<S, E, R>;
-
-    fn connect(self, receiver: R) -> Self::Operation {
-        RepeatNOperation {
-            state: Arc::new(RepeatNState {
-                sender: self.sender,
-                remaining: UnsafeCell::new(self.count),
-                receiver: UnsafeCell::new(Some(receiver)),
-                current_op: UnsafeCell::new(None),
-                _phantom: PhantomData,
-            }),
-        }
-    }
+/// Inner receiver for repeat_n iterations.
+///
+/// Uses type-erased function pointers to break the circular type dependency.
+/// This is allocation-free - no Box or Arc.
+pub struct RepeatNInnerReceiver<E> {
+    /// Type-erased pointer to parent operation.
+    parent: *mut (),
+    /// Callback for value completion - schedules next iteration.
+    on_value: unsafe fn(*mut ()),
+    /// Callback for error completion - forwards to downstream receiver.
+    on_error: unsafe fn(*mut (), E),
+    /// Callback for stopped completion - forwards to downstream receiver.
+    on_stopped: unsafe fn(*mut ()),
 }
 
-struct RepeatNState<S, E, R>
-where
-    S: SenderTo<RepeatNInnerReceiver<E, R>>,
-{
-    sender: S,
-    remaining: UnsafeCell<usize>,
-    receiver: UnsafeCell<Option<R>>,
-    current_op: UnsafeCell<Option<<S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation>>,
-    _phantom: PhantomData<E>,
-}
+// SAFETY: The parent pointer points to a pinned operation that is Send.
+unsafe impl<E: Send> Send for RepeatNInnerReceiver<E> {}
+unsafe impl<E: Send> Sync for RepeatNInnerReceiver<E> {}
 
-// SAFETY: Access is synchronized through the execution model
-unsafe impl<S: Send, E, R: Send> Send for RepeatNState<S, E, R>
-where
-    S: SenderTo<RepeatNInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-unsafe impl<S: Send, E, R: Send> Sync for RepeatNState<S, E, R>
-where
-    S: SenderTo<RepeatNInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-
-/// Operation state for repeat_n.
-pub struct RepeatNOperation<S, E, R>
-where
-    S: SenderTo<RepeatNInnerReceiver<E, R>>,
-{
-    state: Arc<RepeatNState<S, E, R>>,
-}
-
-/// Inner receiver for repeat iterations (breaks the recursive bound).
-pub struct RepeatNInnerReceiver<E, R> {
-    on_value: Box<dyn FnOnce() + Send>,
-    on_error: Box<dyn FnOnce(E) + Send>,
-    on_stopped: Box<dyn FnOnce() + Send>,
-    _phantom: PhantomData<R>,
-}
-
-impl<E, R> Receiver for RepeatNInnerReceiver<E, R> {
+impl<E> Receiver for RepeatNInnerReceiver<E> {
     type Env = RepeatEnv;
 
     fn get_env(&self) -> &Self::Env {
@@ -423,136 +150,550 @@ impl<E, R> Receiver for RepeatNInnerReceiver<E, R> {
     }
 }
 
-impl<E, R> ReceiverOf<()> for RepeatNInnerReceiver<E, R> {
+impl<E> ReceiverOf<()> for RepeatNInnerReceiver<E> {
     fn set_value(self, _: ()) {
-        (self.on_value)();
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        unsafe { (self.on_value)(self.parent) }
     }
 }
 
-impl<E, R> ReceiverOfError<E> for RepeatNInnerReceiver<E, R> {
+impl<E> ReceiverOfError<E> for RepeatNInnerReceiver<E> {
     fn set_error(self, error: E) {
-        (self.on_error)(error);
+        unsafe { (self.on_error)(self.parent, error) }
     }
 }
 
-impl<E, R> ReceiverOfStopped for RepeatNInnerReceiver<E, R> {
+impl<E> ReceiverOfStopped for RepeatNInnerReceiver<E> {
     fn set_stopped(self) {
-        (self.on_stopped)();
+        unsafe { (self.on_stopped)(self.parent) }
     }
 }
 
-/// Environment for repeat receivers.
-pub struct RepeatEnv;
-
-impl Environment for RepeatEnv {
-    type StopToken = crate::stop::NeverStopToken;
-
-    fn get_stop_token(&self) -> Self::StopToken {
-        crate::stop::NeverStopToken
-    }
-}
-
-impl<S, E, R> RepeatNState<S, E, R>
+impl<F, S, E, R> SenderTo<R> for RepeatN<F, S, E>
 where
+    F: Fn(usize) -> S + Send + 'static,
     S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatNInnerReceiver<E, R>>
-        + Clone
+        + SenderTo<RepeatNInnerReceiver<E>>
         + Send
         + 'static,
-    <S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation: Send,
+    <S as SenderTo<RepeatNInnerReceiver<E>>>::Operation: Send,
     E: Send + 'static,
     R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
 {
-    fn start_next(self: &Arc<Self>) {
-        let remaining = unsafe { *self.remaining.get() };
-        if remaining == 0 {
-            // Done - complete with value
-            let receiver = unsafe { (*self.receiver.get()).take() };
-            if let Some(receiver) = receiver {
+    type Operation = RepeatNOperation<F, S, E, R>;
+
+    fn connect(self, receiver: R) -> Self::Operation {
+        RepeatNOperation {
+            factory: self.factory,
+            count: self.count,
+            current_index: 0,
+            receiver: Some(receiver),
+            current_op: UnsafeCell::new(MaybeUninit::uninit()),
+            started: false,
+            iteration_active: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Operation state for repeat_n - allocation-free.
+///
+/// State is stored inline. The inner receiver holds a raw pointer to this
+/// operation, which is safe because the operation is pinned when start() is called.
+pub struct RepeatNOperation<F, S, E, R>
+where
+    S: SenderTo<RepeatNInnerReceiver<E>>,
+{
+    /// Factory to create senders for each iteration.
+    factory: F,
+    /// Total number of iterations.
+    count: usize,
+    /// Current iteration index.
+    current_index: usize,
+    /// Downstream receiver - consumed on completion.
+    receiver: Option<R>,
+    /// Current child operation - recreated each iteration.
+    current_op: UnsafeCell<MaybeUninit<<S as SenderTo<RepeatNInnerReceiver<E>>>::Operation>>,
+    /// Whether start() has been called.
+    started: bool,
+    /// Whether there's an active iteration (child op is initialized).
+    iteration_active: bool,
+    _phantom: PhantomData<E>,
+}
+
+// SAFETY: All fields are Send, and UnsafeCell access is synchronized by the execution model.
+unsafe impl<F, S, E, R> Send for RepeatNOperation<F, S, E, R>
+where
+    F: Send,
+    S: SenderTo<RepeatNInnerReceiver<E>> + Send,
+    <S as SenderTo<RepeatNInnerReceiver<E>>>::Operation: Send,
+    E: Send,
+    R: Send,
+{
+}
+
+impl<F, S, E, R> RepeatNOperation<F, S, E, R>
+where
+    F: Fn(usize) -> S + Send + 'static,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
+        + SenderTo<RepeatNInnerReceiver<E>>
+        + Send
+        + 'static,
+    <S as SenderTo<RepeatNInnerReceiver<E>>>::Operation: Send,
+    E: Send + 'static,
+    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
+{
+    /// Start the next iteration or complete if done.
+    ///
+    /// SAFETY: Must only be called when the operation is pinned.
+    unsafe fn start_next(&mut self) {
+        if self.current_index >= self.count {
+            // All iterations complete - signal value to downstream
+            if let Some(receiver) = self.receiver.take() {
                 receiver.set_value(());
             }
-        } else {
-            // Create callbacks that reference self
-            let state_for_value = self.clone();
-            let state_for_error = self.clone();
-            let state_for_stopped = self.clone();
+            return;
+        }
 
-            let inner_receiver = RepeatNInnerReceiver {
-                on_value: Box::new(move || state_for_value.on_value()),
-                on_error: Box::new(move |e| state_for_error.on_error(e)),
-                on_stopped: Box::new(move || state_for_stopped.on_stopped()),
-                _phantom: PhantomData,
-            };
+        // Create sender for this iteration
+        let sender = (self.factory)(self.current_index);
 
-            // Clone the sender for this iteration
-            let sender = self.sender.clone();
-            let op = sender.connect(inner_receiver);
-            unsafe {
-                *self.current_op.get() = Some(op);
-                if let Some(op) = (*self.current_op.get()).as_mut() {
-                    Pin::new_unchecked(op).start();
-                }
-            }
+        // Create inner receiver with raw pointer to self
+        let parent = self as *mut Self as *mut ();
+        let inner_receiver = RepeatNInnerReceiver {
+            parent,
+            on_value: Self::handle_value,
+            on_error: Self::handle_error,
+            on_stopped: Self::handle_stopped,
+        };
+
+        // Connect and store the operation
+        let op = sender.connect(inner_receiver);
+        // SAFETY: We have exclusive access to current_op
+        unsafe {
+            (*self.current_op.get()).write(op);
+        }
+        self.iteration_active = true;
+
+        // Start the child operation
+        // SAFETY: We have exclusive access and the operation is now initialized
+        unsafe {
+            let op_ptr = (*self.current_op.get()).as_mut_ptr();
+            Pin::new_unchecked(&mut *op_ptr).start();
         }
     }
 
-    fn on_value(self: &Arc<Self>) {
-        unsafe {
-            let remaining = &mut *self.remaining.get();
-            *remaining -= 1;
-            *self.current_op.get() = None;
+    /// Handle value completion from child - schedule next iteration.
+    ///
+    /// SAFETY: parent must be a valid pointer to a pinned RepeatNOperation.
+    unsafe fn handle_value(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        // Drop current operation
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
         }
-        // Use trampoline to prevent stack overflow with many iterations
-        let state = self.clone();
+
+        // Advance to next iteration
+        this.current_index += 1;
+
+        // Use trampoline to prevent stack overflow
+        let parent_ptr = parent;
         trampoline_submit(move || {
-            state.start_next();
+            // SAFETY: parent is valid because operation is pinned and outlives the trampoline
+            let this = unsafe { &mut *(parent_ptr as *mut Self) };
+            // SAFETY: operation is pinned
+            unsafe { this.start_next() };
         });
     }
 
-    fn on_error(self: &Arc<Self>, error: E) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
+    /// Handle error completion from child - forward to downstream.
+    ///
+    /// SAFETY: parent must be a valid pointer to a pinned RepeatNOperation.
+    unsafe fn handle_error(parent: *mut (), error: E) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        // Drop current operation
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        // Forward error to downstream receiver
+        if let Some(receiver) = this.receiver.take() {
             receiver.set_error(error);
         }
     }
 
-    fn on_stopped(self: &Arc<Self>) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
+    /// Handle stopped completion from child - forward to downstream.
+    ///
+    /// SAFETY: parent must be a valid pointer to a pinned RepeatNOperation.
+    unsafe fn handle_stopped(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        // Drop current operation
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        // Forward stopped to downstream receiver
+        if let Some(receiver) = this.receiver.take() {
             receiver.set_stopped();
         }
     }
 }
 
-impl<S, E, R> OperationState for RepeatNOperation<S, E, R>
+impl<F, S, E, R> OperationState for RepeatNOperation<F, S, E, R>
 where
+    F: Fn(usize) -> S + Send + 'static,
     S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatNInnerReceiver<E, R>>
-        + Clone
+        + SenderTo<RepeatNInnerReceiver<E>>
         + Send
         + 'static,
-    <S as SenderTo<RepeatNInnerReceiver<E, R>>>::Operation: Send,
+    <S as SenderTo<RepeatNInnerReceiver<E>>>::Operation: Send,
     E: Send + 'static,
     R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
 {
     fn start(self: Pin<&mut Self>) {
-        self.state.start_next();
+        // SAFETY: We don't move self, only access fields
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if this.started {
+            return;
+        }
+        this.started = true;
+
+        // SAFETY: We're now pinned, so it's safe to store pointers to self
+        unsafe { this.start_next() };
+    }
+}
+
+impl<F, S, E, R> Drop for RepeatNOperation<F, S, E, R>
+where
+    S: SenderTo<RepeatNInnerReceiver<E>>,
+{
+    fn drop(&mut self) {
+        // Drop the child operation if it's active
+        if self.iteration_active {
+            unsafe {
+                std::ptr::drop_in_place((*self.current_op.get()).as_mut_ptr());
+            }
+        }
     }
 }
 
 // ============================================================================
-// repeat_effect_until - repeat until predicate returns true
+// repeat_effect - repeat a sender forever using a factory (ALLOCATION-FREE)
 // ============================================================================
 
-/// Repeat a sender until a predicate returns `true`.
+/// Repeat a sender forever (until error or stopped) using a factory function.
 ///
-/// The sender must implement `Clone` and complete with `()`. After each
-/// successful completion, the predicate is called. If it returns `true`,
-/// the overall sender completes. If `false`, the sender is cloned and started.
+/// The factory is called for each iteration to create a new sender.
+/// This is useful for accept loops that should run continuously.
 ///
-/// This follows the stdexec/kuhllib pattern where the sender does work and
-/// updates shared state, and the predicate checks that state to determine
-/// completion.
+/// This implementation is allocation-free.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use exec_rs::adaptors::repeat_effect;
+/// use exec_rs::factories::just;
+///
+/// // This would run forever
+/// let sender = repeat_effect(|| {
+///     just(())  // Create a new sender each iteration
+/// });
+/// ```
+pub fn repeat_effect<F, S, E>(factory: F) -> RepeatEffect<F, S, E>
+where
+    F: Fn() -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
+{
+    RepeatEffect {
+        factory,
+        _phantom: PhantomData,
+    }
+}
+
+/// A sender that repeats using a factory forever.
+pub struct RepeatEffect<F, S, E> {
+    factory: F,
+    _phantom: PhantomData<(S, E)>,
+}
+
+impl<F: Clone, S, E> Clone for RepeatEffect<F, S, E> {
+    fn clone(&self) -> Self {
+        Self {
+            factory: self.factory.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<F, S, E> std::fmt::Debug for RepeatEffect<F, S, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepeatEffect").finish()
+    }
+}
+
+/// Completion signatures for repeat_effect.
+pub struct RepeatEffectCompletions<E> {
+    _phantom: PhantomData<E>,
+}
+
+impl<E> CompletionSignatures for RepeatEffectCompletions<E> {
+    type Value = (); // Never actually completes with value
+    type Error = E;
+    const SENDS_STOPPED: bool = true;
+}
+
+impl<F, S, E> Sender for RepeatEffect<F, S, E>
+where
+    F: Fn() -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
+{
+    type Completions = RepeatEffectCompletions<E>;
+}
+
+/// Inner receiver for repeat_effect iterations.
+pub struct RepeatEffectInnerReceiver<E> {
+    parent: *mut (),
+    on_value: unsafe fn(*mut ()),
+    on_error: unsafe fn(*mut (), E),
+    on_stopped: unsafe fn(*mut ()),
+}
+
+unsafe impl<E: Send> Send for RepeatEffectInnerReceiver<E> {}
+unsafe impl<E: Send> Sync for RepeatEffectInnerReceiver<E> {}
+
+impl<E> Receiver for RepeatEffectInnerReceiver<E> {
+    type Env = RepeatEnv;
+
+    fn get_env(&self) -> &Self::Env {
+        &RepeatEnv
+    }
+}
+
+impl<E> ReceiverOf<()> for RepeatEffectInnerReceiver<E> {
+    fn set_value(self, _: ()) {
+        unsafe { (self.on_value)(self.parent) }
+    }
+}
+
+impl<E> ReceiverOfError<E> for RepeatEffectInnerReceiver<E> {
+    fn set_error(self, error: E) {
+        unsafe { (self.on_error)(self.parent, error) }
+    }
+}
+
+impl<E> ReceiverOfStopped for RepeatEffectInnerReceiver<E> {
+    fn set_stopped(self) {
+        unsafe { (self.on_stopped)(self.parent) }
+    }
+}
+
+impl<F, S, E, R> SenderTo<R> for RepeatEffect<F, S, E>
+where
+    F: Fn() -> S + Send + 'static,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
+        + SenderTo<RepeatEffectInnerReceiver<E>>
+        + Send
+        + 'static,
+    <S as SenderTo<RepeatEffectInnerReceiver<E>>>::Operation: Send,
+    E: Send + 'static,
+    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
+{
+    type Operation = RepeatEffectOperation<F, S, E, R>;
+
+    fn connect(self, receiver: R) -> Self::Operation {
+        RepeatEffectOperation {
+            factory: self.factory,
+            receiver: Some(receiver),
+            current_op: UnsafeCell::new(MaybeUninit::uninit()),
+            started: false,
+            iteration_active: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Operation state for repeat_effect - allocation-free.
+pub struct RepeatEffectOperation<F, S, E, R>
+where
+    S: SenderTo<RepeatEffectInnerReceiver<E>>,
+{
+    factory: F,
+    receiver: Option<R>,
+    current_op: UnsafeCell<MaybeUninit<<S as SenderTo<RepeatEffectInnerReceiver<E>>>::Operation>>,
+    started: bool,
+    iteration_active: bool,
+    _phantom: PhantomData<E>,
+}
+
+unsafe impl<F, S, E, R> Send for RepeatEffectOperation<F, S, E, R>
+where
+    F: Send,
+    S: SenderTo<RepeatEffectInnerReceiver<E>> + Send,
+    <S as SenderTo<RepeatEffectInnerReceiver<E>>>::Operation: Send,
+    E: Send,
+    R: Send,
+{
+}
+
+impl<F, S, E, R> RepeatEffectOperation<F, S, E, R>
+where
+    F: Fn() -> S + Send + 'static,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
+        + SenderTo<RepeatEffectInnerReceiver<E>>
+        + Send
+        + 'static,
+    <S as SenderTo<RepeatEffectInnerReceiver<E>>>::Operation: Send,
+    E: Send + 'static,
+    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
+{
+    unsafe fn start_iteration(&mut self) {
+        let sender = (self.factory)();
+
+        let parent = self as *mut Self as *mut ();
+        let inner_receiver = RepeatEffectInnerReceiver {
+            parent,
+            on_value: Self::handle_value,
+            on_error: Self::handle_error,
+            on_stopped: Self::handle_stopped,
+        };
+
+        let op = sender.connect(inner_receiver);
+        // SAFETY: We have exclusive access to current_op
+        unsafe {
+            (*self.current_op.get()).write(op);
+        }
+        self.iteration_active = true;
+
+        // SAFETY: We have exclusive access and the operation is now initialized
+        unsafe {
+            let op_ptr = (*self.current_op.get()).as_mut_ptr();
+            Pin::new_unchecked(&mut *op_ptr).start();
+        }
+    }
+
+    unsafe fn handle_value(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        let parent_ptr = parent;
+        trampoline_submit(move || {
+            // SAFETY: parent is valid because operation is pinned and outlives the trampoline
+            let this = unsafe { &mut *(parent_ptr as *mut Self) };
+            // SAFETY: operation is pinned
+            unsafe { this.start_iteration() };
+        });
+    }
+
+    unsafe fn handle_error(parent: *mut (), error: E) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        if let Some(receiver) = this.receiver.take() {
+            receiver.set_error(error);
+        }
+    }
+
+    unsafe fn handle_stopped(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        if let Some(receiver) = this.receiver.take() {
+            receiver.set_stopped();
+        }
+    }
+}
+
+impl<F, S, E, R> OperationState for RepeatEffectOperation<F, S, E, R>
+where
+    F: Fn() -> S + Send + 'static,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
+        + SenderTo<RepeatEffectInnerReceiver<E>>
+        + Send
+        + 'static,
+    <S as SenderTo<RepeatEffectInnerReceiver<E>>>::Operation: Send,
+    E: Send + 'static,
+    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
+{
+    fn start(self: Pin<&mut Self>) {
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if this.started {
+            return;
+        }
+        this.started = true;
+
+        unsafe { this.start_iteration() };
+    }
+}
+
+impl<F, S, E, R> Drop for RepeatEffectOperation<F, S, E, R>
+where
+    S: SenderTo<RepeatEffectInnerReceiver<E>>,
+{
+    fn drop(&mut self) {
+        if self.iteration_active {
+            unsafe {
+                std::ptr::drop_in_place((*self.current_op.get()).as_mut_ptr());
+            }
+        }
+    }
+}
+
+// ============================================================================
+// repeat_effect_until - repeat until predicate returns true (ALLOCATION-FREE)
+// ============================================================================
+
+/// Repeat using a factory until a predicate returns `true`.
+///
+/// The factory is called for each iteration to create a new sender.
+/// After each successful completion, the predicate is called. If it returns
+/// `true`, the overall sender completes. If `false`, the factory is called
+/// again for the next iteration.
+///
+/// This implementation is allocation-free.
 ///
 /// # Example
 ///
@@ -564,49 +705,51 @@ where
 /// use std::sync::Arc;
 ///
 /// let counter = Arc::new(AtomicUsize::new(0));
-/// let counter_clone = counter.clone();
-/// let counter_pred = counter.clone();
+/// let c = counter.clone();
+/// let c_pred = counter.clone();
 ///
-/// let sender = then(just(()), move |_: ()| {
-///     counter_clone.fetch_add(1, Ordering::SeqCst);
-/// });
+/// let sender = repeat_effect_until(
+///     move || {
+///         let c = c.clone();
+///         then(just(()), move |_| { c.fetch_add(1, Ordering::SeqCst); })
+///     },
+///     move || c_pred.load(Ordering::SeqCst) >= 5,
+/// );
 ///
-/// let predicate = move || counter_pred.load(Ordering::SeqCst) >= 5;
-///
-/// let result = sync_wait(repeat_effect_until(sender, predicate)).unwrap();
-/// assert_eq!(result, ());
+/// sync_wait(sender).unwrap();
 /// assert_eq!(counter.load(Ordering::SeqCst), 5);
 /// ```
-pub fn repeat_effect_until<S, P, E>(sender: S, predicate: P) -> RepeatEffectUntil<S, P, E>
+pub fn repeat_effect_until<F, S, P, E>(factory: F, predicate: P) -> RepeatEffectUntil<F, S, P, E>
 where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
+    F: Fn() -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
     P: Fn() -> bool,
 {
     RepeatEffectUntil {
-        sender,
+        factory,
         predicate,
         _phantom: PhantomData,
     }
 }
 
-/// A sender that repeats another sender until a predicate returns true.
-pub struct RepeatEffectUntil<S, P, E> {
-    sender: S,
+/// A sender that repeats using a factory until a predicate returns true.
+pub struct RepeatEffectUntil<F, S, P, E> {
+    factory: F,
     predicate: P,
-    _phantom: PhantomData<E>,
+    _phantom: PhantomData<(S, E)>,
 }
 
-impl<S: Clone, P: Clone, E> Clone for RepeatEffectUntil<S, P, E> {
+impl<F: Clone, S, P: Clone, E> Clone for RepeatEffectUntil<F, S, P, E> {
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            factory: self.factory.clone(),
             predicate: self.predicate.clone(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<S, P, E> std::fmt::Debug for RepeatEffectUntil<S, P, E> {
+impl<F, S, P, E> std::fmt::Debug for RepeatEffectUntil<F, S, P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepeatEffectUntil").finish()
     }
@@ -623,84 +766,27 @@ impl<E> CompletionSignatures for RepeatEffectUntilCompletions<E> {
     const SENDS_STOPPED: bool = true;
 }
 
-impl<S, P, E> Sender for RepeatEffectUntil<S, P, E>
+impl<F, S, P, E> Sender for RepeatEffectUntil<F, S, P, E>
 where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>> + Clone,
+    F: Fn() -> S,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>,
     P: Fn() -> bool,
 {
     type Completions = RepeatEffectUntilCompletions<E>;
 }
 
-impl<S, P, E, R> SenderTo<R> for RepeatEffectUntil<S, P, E>
-where
-    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectUntilInnerReceiver<E, R>>
-        + Clone
-        + Send
-        + 'static,
-    <S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation: Send,
-    P: Fn() -> bool + Send + 'static,
-    E: Send + 'static,
-    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
-{
-    type Operation = RepeatEffectUntilOperation<S, P, E, R>;
-
-    fn connect(self, receiver: R) -> Self::Operation {
-        RepeatEffectUntilOperation {
-            state: Arc::new(RepeatEffectUntilState {
-                sender: self.sender,
-                predicate: self.predicate,
-                receiver: UnsafeCell::new(Some(receiver)),
-                current_op: UnsafeCell::new(None),
-                _phantom: PhantomData,
-            }),
-        }
-    }
-}
-
-struct RepeatEffectUntilState<S, P, E, R>
-where
-    S: SenderTo<RepeatEffectUntilInnerReceiver<E, R>>,
-{
-    sender: S,
-    predicate: P,
-    receiver: UnsafeCell<Option<R>>,
-    current_op:
-        UnsafeCell<Option<<S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation>>,
-    _phantom: PhantomData<E>,
-}
-
-// SAFETY: Access is synchronized through the execution model
-unsafe impl<S: Send, P: Send, E, R: Send> Send for RepeatEffectUntilState<S, P, E, R>
-where
-    S: SenderTo<RepeatEffectUntilInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-unsafe impl<S: Send, P: Send, E, R: Send> Sync for RepeatEffectUntilState<S, P, E, R>
-where
-    S: SenderTo<RepeatEffectUntilInnerReceiver<E, R>>,
-    <S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation: Send,
-{
-}
-
-/// Operation state for repeat_effect_until.
-pub struct RepeatEffectUntilOperation<S, P, E, R>
-where
-    S: SenderTo<RepeatEffectUntilInnerReceiver<E, R>>,
-{
-    state: Arc<RepeatEffectUntilState<S, P, E, R>>,
-}
-
 /// Inner receiver for repeat_effect_until iterations.
-pub struct RepeatEffectUntilInnerReceiver<E, R> {
-    on_value: Box<dyn FnOnce(()) + Send>,
-    on_error: Box<dyn FnOnce(E) + Send>,
-    on_stopped: Box<dyn FnOnce() + Send>,
-    _phantom: PhantomData<R>,
+pub struct RepeatEffectUntilInnerReceiver<E> {
+    parent: *mut (),
+    on_value: unsafe fn(*mut ()),
+    on_error: unsafe fn(*mut (), E),
+    on_stopped: unsafe fn(*mut ()),
 }
 
-impl<E, R> Receiver for RepeatEffectUntilInnerReceiver<E, R> {
+unsafe impl<E: Send> Send for RepeatEffectUntilInnerReceiver<E> {}
+unsafe impl<E: Send> Sync for RepeatEffectUntilInnerReceiver<E> {}
+
+impl<E> Receiver for RepeatEffectUntilInnerReceiver<E> {
     type Env = RepeatEnv;
 
     fn get_env(&self) -> &Self::Env {
@@ -708,108 +794,213 @@ impl<E, R> Receiver for RepeatEffectUntilInnerReceiver<E, R> {
     }
 }
 
-impl<E, R> ReceiverOf<()> for RepeatEffectUntilInnerReceiver<E, R> {
+impl<E> ReceiverOf<()> for RepeatEffectUntilInnerReceiver<E> {
     fn set_value(self, _: ()) {
-        (self.on_value)(());
+        unsafe { (self.on_value)(self.parent) }
     }
 }
 
-impl<E, R> ReceiverOfError<E> for RepeatEffectUntilInnerReceiver<E, R> {
+impl<E> ReceiverOfError<E> for RepeatEffectUntilInnerReceiver<E> {
     fn set_error(self, error: E) {
-        (self.on_error)(error);
+        unsafe { (self.on_error)(self.parent, error) }
     }
 }
 
-impl<E, R> ReceiverOfStopped for RepeatEffectUntilInnerReceiver<E, R> {
+impl<E> ReceiverOfStopped for RepeatEffectUntilInnerReceiver<E> {
     fn set_stopped(self) {
-        (self.on_stopped)();
+        unsafe { (self.on_stopped)(self.parent) }
     }
 }
 
-impl<S, P, E, R> RepeatEffectUntilState<S, P, E, R>
+impl<F, S, P, E, R> SenderTo<R> for RepeatEffectUntil<F, S, P, E>
 where
+    F: Fn() -> S + Send + 'static,
     S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectUntilInnerReceiver<E, R>>
-        + Clone
+        + SenderTo<RepeatEffectUntilInnerReceiver<E>>
         + Send
         + 'static,
-    <S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation: Send,
+    <S as SenderTo<RepeatEffectUntilInnerReceiver<E>>>::Operation: Send,
     P: Fn() -> bool + Send + 'static,
     E: Send + 'static,
     R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
 {
-    fn start_iteration(self: &Arc<Self>) {
-        let state_for_value = self.clone();
-        let state_for_error = self.clone();
-        let state_for_stopped = self.clone();
+    type Operation = RepeatEffectUntilOperation<F, S, P, E, R>;
 
-        let inner_receiver = RepeatEffectUntilInnerReceiver {
-            on_value: Box::new(move |_| state_for_value.on_value()),
-            on_error: Box::new(move |e| state_for_error.on_error(e)),
-            on_stopped: Box::new(move || state_for_stopped.on_stopped()),
+    fn connect(self, receiver: R) -> Self::Operation {
+        RepeatEffectUntilOperation {
+            factory: self.factory,
+            predicate: self.predicate,
+            receiver: Some(receiver),
+            current_op: UnsafeCell::new(MaybeUninit::uninit()),
+            started: false,
+            iteration_active: false,
             _phantom: PhantomData,
+        }
+    }
+}
+
+/// Operation state for repeat_effect_until - allocation-free.
+pub struct RepeatEffectUntilOperation<F, S, P, E, R>
+where
+    S: SenderTo<RepeatEffectUntilInnerReceiver<E>>,
+{
+    factory: F,
+    predicate: P,
+    receiver: Option<R>,
+    current_op:
+        UnsafeCell<MaybeUninit<<S as SenderTo<RepeatEffectUntilInnerReceiver<E>>>::Operation>>,
+    started: bool,
+    iteration_active: bool,
+    _phantom: PhantomData<E>,
+}
+
+unsafe impl<F, S, P, E, R> Send for RepeatEffectUntilOperation<F, S, P, E, R>
+where
+    F: Send,
+    S: SenderTo<RepeatEffectUntilInnerReceiver<E>> + Send,
+    <S as SenderTo<RepeatEffectUntilInnerReceiver<E>>>::Operation: Send,
+    P: Send,
+    E: Send,
+    R: Send,
+{
+}
+
+impl<F, S, P, E, R> RepeatEffectUntilOperation<F, S, P, E, R>
+where
+    F: Fn() -> S + Send + 'static,
+    S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
+        + SenderTo<RepeatEffectUntilInnerReceiver<E>>
+        + Send
+        + 'static,
+    <S as SenderTo<RepeatEffectUntilInnerReceiver<E>>>::Operation: Send,
+    P: Fn() -> bool + Send + 'static,
+    E: Send + 'static,
+    R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
+{
+    unsafe fn start_iteration(&mut self) {
+        let sender = (self.factory)();
+
+        let parent = self as *mut Self as *mut ();
+        let inner_receiver = RepeatEffectUntilInnerReceiver {
+            parent,
+            on_value: Self::handle_value,
+            on_error: Self::handle_error,
+            on_stopped: Self::handle_stopped,
         };
 
-        // Clone the sender for this iteration
-        let sender = self.sender.clone();
         let op = sender.connect(inner_receiver);
+        // SAFETY: We have exclusive access to current_op
         unsafe {
-            *self.current_op.get() = Some(op);
-            if let Some(op) = (*self.current_op.get()).as_mut() {
-                Pin::new_unchecked(op).start();
-            }
+            (*self.current_op.get()).write(op);
+        }
+        self.iteration_active = true;
+
+        // SAFETY: We have exclusive access and the operation is now initialized
+        unsafe {
+            let op_ptr = (*self.current_op.get()).as_mut_ptr();
+            Pin::new_unchecked(&mut *op_ptr).start();
         }
     }
 
-    fn on_value(self: &Arc<Self>) {
-        // Check predicate after each iteration
-        let done = (self.predicate)();
-        if done {
-            let receiver = unsafe { (*self.receiver.get()).take() };
-            if let Some(receiver) = receiver {
+    unsafe fn handle_value(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        // Check predicate
+        if (this.predicate)() {
+            // Done - signal value to downstream
+            if let Some(receiver) = this.receiver.take() {
                 receiver.set_value(());
             }
         } else {
-            unsafe {
-                *self.current_op.get() = None;
-            }
-            // Use trampoline to prevent stack overflow with many iterations
-            let state = self.clone();
+            // Continue iterating
+            let parent_ptr = parent;
             trampoline_submit(move || {
-                state.start_iteration();
+                // SAFETY: parent is valid because operation is pinned and outlives the trampoline
+                let this = unsafe { &mut *(parent_ptr as *mut Self) };
+                // SAFETY: operation is pinned
+                unsafe { this.start_iteration() };
             });
         }
     }
 
-    fn on_error(self: &Arc<Self>, error: E) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
+    unsafe fn handle_error(parent: *mut (), error: E) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        if let Some(receiver) = this.receiver.take() {
             receiver.set_error(error);
         }
     }
 
-    fn on_stopped(self: &Arc<Self>) {
-        let receiver = unsafe { (*self.receiver.get()).take() };
-        if let Some(receiver) = receiver {
+    unsafe fn handle_stopped(parent: *mut ()) {
+        // SAFETY: parent is valid because operation is pinned and outlives us
+        let this = unsafe { &mut *(parent as *mut Self) };
+
+        if this.iteration_active {
+            // SAFETY: current_op is initialized when iteration_active is true
+            unsafe {
+                std::ptr::drop_in_place((*this.current_op.get()).as_mut_ptr());
+            }
+            this.iteration_active = false;
+        }
+
+        if let Some(receiver) = this.receiver.take() {
             receiver.set_stopped();
         }
     }
 }
 
-impl<S, P, E, R> OperationState for RepeatEffectUntilOperation<S, P, E, R>
+impl<F, S, P, E, R> OperationState for RepeatEffectUntilOperation<F, S, P, E, R>
 where
+    F: Fn() -> S + Send + 'static,
     S: Sender<Completions: CompletionSignatures<Value = (), Error = E>>
-        + SenderTo<RepeatEffectUntilInnerReceiver<E, R>>
-        + Clone
+        + SenderTo<RepeatEffectUntilInnerReceiver<E>>
         + Send
         + 'static,
-    <S as SenderTo<RepeatEffectUntilInnerReceiver<E, R>>>::Operation: Send,
+    <S as SenderTo<RepeatEffectUntilInnerReceiver<E>>>::Operation: Send,
     P: Fn() -> bool + Send + 'static,
     E: Send + 'static,
     R: ReceiverOf<()> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
 {
     fn start(self: Pin<&mut Self>) {
-        self.state.start_iteration();
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if this.started {
+            return;
+        }
+        this.started = true;
+
+        unsafe { this.start_iteration() };
+    }
+}
+
+impl<F, S, P, E, R> Drop for RepeatEffectUntilOperation<F, S, P, E, R>
+where
+    S: SenderTo<RepeatEffectUntilInnerReceiver<E>>,
+{
+    fn drop(&mut self) {
+        if self.iteration_active {
+            unsafe {
+                std::ptr::drop_in_place((*self.current_op.get()).as_mut_ptr());
+            }
+        }
     }
 }
 
@@ -820,17 +1011,24 @@ mod tests {
     use crate::consumers::sync_wait;
     use crate::factories::just;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn test_repeat_n_zero() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let c = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_n(
+            move |_| {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            0,
+        );
 
-        let result = sync_wait(repeat_n(sender, 0)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
@@ -838,13 +1036,19 @@ mod tests {
     #[test]
     fn test_repeat_n_once() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let c = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_n(
+            move |_| {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            1,
+        );
 
-        let result = sync_wait(repeat_n(sender, 1)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -852,31 +1056,61 @@ mod tests {
     #[test]
     fn test_repeat_n_multiple() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let c = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_n(
+            move |_| {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            5,
+        );
 
-        let result = sync_wait(repeat_n(sender, 5)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 5);
     }
 
     #[test]
+    fn test_repeat_n_with_index() {
+        // Verify the index is passed correctly
+        let sum = Arc::new(AtomicUsize::new(0));
+        let s = sum.clone();
+
+        let sender = repeat_n(
+            move |i| {
+                let s = s.clone();
+                then(just(()), move |_| {
+                    s.fetch_add(i, Ordering::SeqCst);
+                })
+            },
+            5,
+        );
+
+        sync_wait(sender).unwrap();
+        // Sum of 0+1+2+3+4 = 10
+        assert_eq!(sum.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
     fn test_repeat_effect_until_immediate() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
-        let counter_pred = counter.clone();
+        let c = counter.clone();
+        let c_pred = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_effect_until(
+            move || {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            move || c_pred.load(Ordering::SeqCst) >= 1,
+        );
 
-        // Predicate returns true immediately after first iteration
-        let predicate = move || counter_pred.load(Ordering::SeqCst) >= 1;
-
-        let result = sync_wait(repeat_effect_until(sender, predicate)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -884,16 +1118,20 @@ mod tests {
     #[test]
     fn test_repeat_effect_until_multiple() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
-        let counter_pred = counter.clone();
+        let c = counter.clone();
+        let c_pred = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_effect_until(
+            move || {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            move || c_pred.load(Ordering::SeqCst) >= 5,
+        );
 
-        let predicate = move || counter_pred.load(Ordering::SeqCst) >= 5;
-
-        let result = sync_wait(repeat_effect_until(sender, predicate)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 5);
     }
@@ -901,16 +1139,20 @@ mod tests {
     #[test]
     fn test_repeat_n_deep_iteration() {
         // Test that deep iteration doesn't overflow the stack
-        // thanks to the trampoline scheduler
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let c = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_n(
+            move |_| {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            10000,
+        );
 
-        // 10000 iterations would overflow the stack without trampoline
-        let result = sync_wait(repeat_n(sender, 10000)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 10000);
     }
@@ -919,16 +1161,20 @@ mod tests {
     fn test_repeat_effect_until_deep_iteration() {
         // Test that deep iteration doesn't overflow the stack
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
-        let counter_pred = counter.clone();
+        let c = counter.clone();
+        let c_pred = counter.clone();
 
-        let sender = then(just(()), move |_: ()| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let sender = repeat_effect_until(
+            move || {
+                let c = c.clone();
+                then(just(()), move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            move || c_pred.load(Ordering::SeqCst) >= 10000,
+        );
 
-        let predicate = move || counter_pred.load(Ordering::SeqCst) >= 10000;
-
-        let result = sync_wait(repeat_effect_until(sender, predicate)).unwrap();
+        let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 10000);
     }

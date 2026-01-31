@@ -1,7 +1,7 @@
 //! Bulk adaptor - execute a function for each index in a range.
 //!
-//! `bulk(sender, shape, fn)` calls the function with each index and the
-//! sender's value, then completes with the original value.
+//! `bulk(sender, shape, fn)` calls the function with each index and a mutable
+//! reference to the sender's value, then completes with the (possibly modified) value.
 
 use crate::traits::{
     CompletionSignatures, Environment, OperationState, Receiver, ReceiverOf, ReceiverOfError,
@@ -13,8 +13,8 @@ use std::pin::Pin;
 /// Execute a function for each index in a range.
 ///
 /// When the upstream sender completes with a value, the function is called
-/// with each index from 0 to shape (exclusive) and a reference to the value.
-/// After all iterations complete, the sender completes with the original value.
+/// with each index from 0 to shape (exclusive) and a mutable reference to the value.
+/// After all iterations complete, the sender completes with the (possibly modified) value.
 ///
 /// # Example
 ///
@@ -22,25 +22,20 @@ use std::pin::Pin;
 /// use exec_rs::adaptors::bulk;
 /// use exec_rs::factories::just;
 /// use exec_rs::consumers::sync_wait;
-/// use std::sync::atomic::{AtomicUsize, Ordering};
-/// use std::sync::Arc;
 ///
-/// let sum = Arc::new(AtomicUsize::new(0));
-/// let sum_clone = sum.clone();
-///
-/// let sender = bulk(just(10), 5, move |i, &val| {
-///     sum_clone.fetch_add(i * val, Ordering::SeqCst);
+/// // Accumulate sum of indices into the value
+/// let sender = bulk(just(0usize), 5, |i, val| {
+///     *val += i;
 /// });
 ///
 /// let result = sync_wait(sender).unwrap();
+/// // 0 + 0 + 1 + 2 + 3 + 4 = 10
 /// assert_eq!(result, 10);
-/// // sum = 0*10 + 1*10 + 2*10 + 3*10 + 4*10 = 100
-/// assert_eq!(sum.load(Ordering::SeqCst), 100);
 /// ```
 pub fn bulk<S, F, V, E>(sender: S, shape: usize, func: F) -> Bulk<S, F>
 where
     S: Sender<Completions: CompletionSignatures<Value = V, Error = E>>,
-    F: FnMut(usize, &V),
+    F: FnMut(usize, &mut V),
 {
     Bulk {
         sender,
@@ -54,6 +49,17 @@ pub struct Bulk<S, F> {
     sender: S,
     shape: usize,
     func: F,
+}
+
+impl<S, F> Bulk<S, F> {
+    /// Create a new Bulk adaptor.
+    pub fn new(sender: S, shape: usize, func: F) -> Self {
+        Self {
+            sender,
+            shape,
+            func,
+        }
+    }
 }
 
 impl<S: Clone, F: Clone> Clone for Bulk<S, F> {
@@ -100,7 +106,7 @@ impl<S, F, V, E, R> SenderTo<R> for Bulk<S, F>
 where
     S: Sender<Completions: CompletionSignatures<Value = V, Error = E>>
         + SenderTo<BulkReceiver<V, E, F, R>>,
-    F: FnMut(usize, &V) + Send + 'static,
+    F: FnMut(usize, &mut V) + Send + 'static,
     V: Send + 'static,
     E: Send + 'static,
     R: ReceiverOf<V> + ReceiverOfError<E> + ReceiverOfStopped + Send + 'static,
@@ -163,15 +169,15 @@ impl<V, E, F, R> Receiver for BulkReceiver<V, E, F, R> {
 
 impl<V, E, F, R> ReceiverOf<V> for BulkReceiver<V, E, F, R>
 where
-    F: FnMut(usize, &V),
+    F: FnMut(usize, &mut V),
     R: ReceiverOf<V>,
 {
-    fn set_value(mut self, value: V) {
+    fn set_value(mut self, mut value: V) {
         // Execute the function for each index
         for i in 0..self.shape {
-            (self.func)(i, &value);
+            (self.func)(i, &mut value);
         }
-        // Forward the value downstream
+        // Forward the (possibly modified) value downstream
         self.downstream.set_value(value);
     }
 }
@@ -199,22 +205,24 @@ mod tests {
     use super::*;
     use crate::consumers::sync_wait;
     use crate::factories::just;
+    use crate::traits::Sender;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    // ========================================================================
+    // test_bulk.cpp equivalents
+    // ========================================================================
+
     #[test]
     fn test_bulk_basic() {
-        let sum = Arc::new(AtomicUsize::new(0));
-        let sum_clone = sum.clone();
-
-        let sender = bulk(just(10usize), 5, move |i, &val| {
-            sum_clone.fetch_add(i * val, Ordering::SeqCst);
+        // Accumulate sum of indices multiplied by initial value
+        let sender = bulk(just(10usize), 5, |i, val| {
+            *val += i * 10; // Add i*10 to the value
         });
 
         let result = sync_wait(sender).unwrap();
-        assert_eq!(result, 10);
-        // sum = 0*10 + 1*10 + 2*10 + 3*10 + 4*10 = 100
-        assert_eq!(sum.load(Ordering::SeqCst), 100);
+        // 10 + 0*10 + 1*10 + 2*10 + 3*10 + 4*10 = 10 + 100 = 110
+        assert_eq!(result, 110);
     }
 
     #[test]
@@ -222,7 +230,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
-        let sender = bulk(just(42), 0, move |_, _: &i32| {
+        let sender = bulk(just(42), 0, move |_, _: &mut i32| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -234,21 +242,13 @@ mod tests {
 
     #[test]
     fn test_bulk_with_mutation() {
-        let results = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let results_clone = results.clone();
-
-        let sender = bulk(just("hello"), 3, move |i, &val| {
-            results_clone.lock().unwrap().push((i, val.to_string()));
+        // Collect indices into a vector
+        let sender = bulk(just(Vec::<usize>::new()), 3, |i, vec| {
+            vec.push(i);
         });
 
         let result = sync_wait(sender).unwrap();
-        assert_eq!(result, "hello");
-
-        let collected = results.lock().unwrap();
-        assert_eq!(collected.len(), 3);
-        assert_eq!(collected[0], (0, "hello".to_string()));
-        assert_eq!(collected[1], (1, "hello".to_string()));
-        assert_eq!(collected[2], (2, "hello".to_string()));
+        assert_eq!(result, vec![0, 1, 2]);
     }
 
     #[test]
@@ -256,12 +256,63 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
-        let sender = bulk(just(()), 10, move |_, _: &()| {
+        let sender = bulk(just(()), 10, move |_, _: &mut ()| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
         let result = sync_wait(sender).unwrap();
         assert_eq!(result, ());
         assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn test_bulk_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = bulk(just(()), 5, |_, _| {});
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_bulk_with_index() {
+        // Accumulate indices into the value
+        let sender = bulk(just(0usize), 5, |i, sum| {
+            *sum += i;
+        });
+
+        let result = sync_wait(sender).unwrap();
+        // 0 + 0 + 1 + 2 + 3 + 4 = 10
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_bulk_large_shape() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        sync_wait(bulk(just(()), 1000, move |_, _| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        }))
+        .unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1000);
+    }
+
+    #[test]
+    fn test_bulk_preserves_value_when_not_modified() {
+        let sender = bulk(just(42), 5, |_, _| {});
+        let result = sync_wait(sender).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_bulk_accumulate_sum() {
+        // Classic use case: accumulate sum of indices
+        let sender = bulk(just(0usize), 10, |i, sum| {
+            *sum += i;
+        });
+
+        let result = sync_wait(sender).unwrap();
+        // 0 + 1 + 2 + ... + 9 = 45
+        assert_eq!(result, 45);
     }
 }

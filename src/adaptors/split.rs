@@ -344,7 +344,12 @@ mod tests {
     use crate::adaptors::then;
     use crate::consumers::sync_wait;
     use crate::factories::{just, just_error};
+    use crate::traits::Sender;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ========================================================================
+    // test_split.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_split_single_consumer() {
@@ -395,5 +400,47 @@ mod tests {
         let sender = split(just_error("error"));
         let result = sync_wait(sender);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_split_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = split(just(42));
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_split_many_clones() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let sender = split(then(just(()), move |_| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            42
+        }));
+
+        // Create many clones and use them all
+        let clones: Vec<_> = (0..10).map(|_| sender.clone()).collect();
+
+        for clone in clones {
+            let result = sync_wait(clone).unwrap();
+            assert_eq!(result, 42);
+        }
+
+        // Work should only run once
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_split_with_string() {
+        let sender = split(just(String::from("hello")));
+        let s1 = sender.clone();
+        let s2 = sender.clone();
+
+        let result1 = sync_wait(s1).unwrap();
+        let result2 = sync_wait(s2).unwrap();
+
+        assert_eq!(result1, "hello");
+        assert_eq!(result2, "hello");
     }
 }

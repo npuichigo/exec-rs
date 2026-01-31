@@ -24,10 +24,62 @@ ctrlc = "3.4"
 default = []
 std = []
 
+# Basic examples
+[[example]]
+name = "hello_world"
+path = "examples/basics/hello_world.rs"
+
+[[example]]
+name = "let_value"
+path = "examples/basics/let_value.rs"
+
+[[example]]
+name = "when_all"
+path = "examples/basics/when_all.rs"
+
+[[example]]
+name = "error_handling"
+path = "examples/basics/error_handling.rs"
+
+[[example]]
+name = "thread_pool"
+path = "examples/basics/thread_pool.rs"
+
+[[example]]
+name = "split"
+path = "examples/basics/split.rs"
+
+[[example]]
+name = "counting_scope"
+path = "examples/basics/counting_scope.rs"
+
+# Algorithm examples
+[[example]]
+name = "parallel_for"
+path = "examples/algorithms/parallel_for.rs"
+
+[[example]]
+name = "retry"
+path = "examples/algorithms/retry.rs"
+
+[[example]]
+name = "async_inclusive_scan"
+path = "examples/async_inclusive_scan.rs"
+
+# Echo server examples
 [[example]]
 name = "tokio_echo"
-path = "examples/tokio_echo.rs"
+path = "examples/echo_server/tokio_echo.rs"
 
 [[example]]
 name = "exec_echo"
-path = "examples/exec_echo.rs"
+path = "examples/echo_server/exec_echo.rs"
+
+# Timed scheduler examples
+[[example]]
+name = "timed_scheduler"
+path = "examples/timed_scheduler/sync.rs"
+
+[[example]]
+name = "timed_scheduler_async"
+path = "examples/timed_scheduler/async.rs"

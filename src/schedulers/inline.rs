@@ -157,7 +157,16 @@ impl<T, R: ReceiverOf<T>> OperationState for TypedInlineScheduleOperation<T, R> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adaptors::then;
     use crate::consumers::sync_wait;
+    use crate::factories::schedule;
+    use crate::traits::Sender;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // ========================================================================
+    // test_inline_scheduler.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_inline_scheduler() {
@@ -172,5 +181,67 @@ mod tests {
         let s1 = InlineScheduler;
         let s2 = InlineScheduler;
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_inline_scheduler_is_scheduler() {
+        fn assert_scheduler<S: Scheduler>(_: &S) {}
+        let scheduler = InlineScheduler;
+        assert_scheduler(&scheduler);
+    }
+
+    #[test]
+    fn test_inline_scheduler_with_then() {
+        let scheduler = InlineScheduler;
+        let result = sync_wait(then(schedule(scheduler), |_| 42)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_inline_scheduler_clone() {
+        let scheduler1 = InlineScheduler;
+        let scheduler2 = scheduler1;
+        assert_eq!(scheduler1, scheduler2);
+    }
+
+    #[test]
+    fn test_inline_scheduler_runs_immediately() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let scheduler = InlineScheduler;
+        let _result = sync_wait(then(schedule(scheduler), move |_| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            42
+        }))
+        .unwrap();
+
+        // Should have run immediately
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_inline_schedule_sender_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let scheduler = InlineScheduler;
+        let sender = scheduler.schedule();
+        assert_sender(&sender);
+    }
+
+    #[test]
+    fn test_typed_inline_scheduler() {
+        let scheduler = TypedInlineScheduler::new(42);
+        let sender = scheduler.schedule();
+        let result = sync_wait(sender).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_typed_inline_scheduler_equality() {
+        let s1 = TypedInlineScheduler::new(42);
+        let s2 = TypedInlineScheduler::new(42);
+        let s3 = TypedInlineScheduler::new(0);
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
     }
 }

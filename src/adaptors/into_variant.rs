@@ -38,6 +38,13 @@ pub struct IntoVariant<S> {
     sender: S,
 }
 
+impl<S> IntoVariant<S> {
+    /// Create a new IntoVariant adaptor.
+    pub fn new(sender: S) -> Self {
+        Self { sender }
+    }
+}
+
 /// Completion signatures for IntoVariant.
 pub struct IntoVariantCompletions<V, E>(PhantomData<(V, E)>);
 

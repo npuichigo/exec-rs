@@ -168,7 +168,12 @@ where
 mod tests {
     use super::*;
     use crate::consumers::sync_wait;
-    use crate::factories::just;
+    use crate::factories::{just, just_error};
+    use crate::traits::SenderExt;
+
+    // ========================================================================
+    // test_then.cpp equivalents
+    // ========================================================================
 
     #[test]
     fn test_then_basic() {
@@ -190,9 +195,76 @@ mod tests {
 
     #[test]
     fn test_then_with_sender_ext() {
-        use crate::traits::SenderExt;
-
         let result = sync_wait(just(21).then(|x| x * 2)).unwrap();
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_then_is_sender() {
+        fn assert_sender<S: Sender>(_: &S) {}
+        let s = then(just(42), |x| x);
+        assert_sender(&s);
+    }
+
+    #[test]
+    fn test_then_with_closure_capture() {
+        let multiplier = 3;
+        let result = sync_wait(just(14).then(move |x| x * multiplier)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_then_unit_to_value() {
+        let result = sync_wait(then(just(()), |_| 42)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_then_preserves_error() {
+        let result = sync_wait(then(just_error::<_>("error"), |_: ()| 0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_then_deeply_chained() {
+        let result = sync_wait(
+            just(1)
+                .then(|x| x + 1)
+                .then(|x| x * 2)
+                .then(|x| x + 3)
+                .then(|x| format!("result: {}", x)),
+        )
+        .unwrap();
+        assert_eq!(result, "result: 7");
+    }
+
+    #[test]
+    fn test_then_with_move_only_value() {
+        let boxed = Box::new(42i32);
+        let result = sync_wait(then(just(boxed), |b: Box<i32>| *b)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_then_identity() {
+        let result = sync_wait(then(just(42), |x| x)).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_then_to_option() {
+        let result = sync_wait(then(just(42), Some)).unwrap();
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn test_then_string_operations() {
+        let result = sync_wait(
+            just("hello")
+                .then(|s| s.to_uppercase())
+                .then(|s| format!("{}!", s)),
+        )
+        .unwrap();
+        assert_eq!(result, "HELLO!");
     }
 }

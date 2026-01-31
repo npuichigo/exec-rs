@@ -72,7 +72,9 @@ impl AsyncScope {
     pub fn spawn<S>(&self, sender: S)
     where
         S: crate::traits::Sender
-            + crate::traits::SenderTo<super::NestReceiver<crate::consumers::DetachedReceiver>>,
+            + crate::traits::SenderTo<super::NestReceiver<crate::consumers::DetachedReceiver>>
+            + 'static,
+        <S as crate::traits::SenderTo<super::NestReceiver<crate::consumers::DetachedReceiver>>>::Operation: Send + 'static,
     {
         use crate::consumers::start_detached;
         start_detached(self.nest(sender));
